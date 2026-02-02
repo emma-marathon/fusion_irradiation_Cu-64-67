@@ -2,12 +2,10 @@
 OpenMC Planar Fusion Neutron Irradiation Model
 
 This script simulates neutron irradiation of materials using a FLARE point source geometry.
-It supports depletion calculations and outputs final material composition.
 
 """
 
 import openmc
-import openmc.deplete
 import numpy as np
 import pandas as pd
 import os
@@ -15,6 +13,8 @@ import shutil
 import multiprocessing as mp
 import matplotlib.pyplot as plt
 from scipy.constants import Avogadro
+
+from utilities import ZN64_ENRICHMENT_MAP
 
 
 # Physical constants
@@ -38,29 +38,6 @@ def create_target_material(zn64_enrichment=0.486):
     mat_inner = openmc.Material(material_id=0, name='target_material_inner')
     mat_outer = openmc.Material(material_id=1, name='target_material_outer')
 
-    # Enriched Zn-64 - use natural composition for other isotopes
-    # Natural Zn composition: Zn64: 48.6%, Zn66: 27.9%, Zn67: 4.1%, Zn68: 18.8%, Zn70: 0.6%
-    # Redistribute remaining isotopes proportionally
-    natural_fractions = {'Zn66': 0.279, 'Zn67': 0.041, 'Zn68': 0.188, 'Zn70': 0.0062}
-    fractions_64_50 = {'Zn66': 0.277, 'Zn67': 0.040, 'Zn68': 0.177, 'Zn70': 0.002}
-    fractions_64_53 = {'Zn66': 0.274, 'Zn67': 0.0398, 'Zn68': 0.155, 'Zn70': 0.001}
-    fractions_64_60 = {'Zn66': 0.162, 'Zn67': 0.0277, 'Zn68': 0.1038, 'Zn70': 0.0008}
-    fractions_64_70 = {'Zn66': 0.047, 'Zn67': 0.016, 'Zn68': 0.03, 'Zn70': 0.0007} # 70.6% 64Cu
-    fractions_64_80 = {'Zn66': 0.012, 'Zn67': 0.0043, 'Zn68': 0.014, 'Zn70': 0.0006}
-    fractions_64_90 = {'Zn66': 0.007, 'Zn67': 0.0023, 'Zn68': 0.0091, 'Zn70': 0.0005}
-    fractions_64_99 = {'Zn66': 0.004, 'Zn67': 0.0011, 'Zn68': 0.0031, 'Zn70': 0.0004} # 99.9% 64Cu
-  
-
-    zn64_enrichment_map = {
-        0.50: fractions_64_50,
-        0.53: fractions_64_53,
-        0.60: fractions_64_60,
-        0.70: fractions_64_70,
-        0.80: fractions_64_80,
-        0.90: fractions_64_90,
-        0.99: fractions_64_99
-    }
-    
     M_Zn64 = openmc.data.atomic_mass('Zn64')
     M_Zn66 = openmc.data.atomic_mass('Zn66')
     M_Zn67 = openmc.data.atomic_mass('Zn67')
@@ -68,10 +45,10 @@ def create_target_material(zn64_enrichment=0.486):
     M_Zn70 = openmc.data.atomic_mass('Zn70')
 
     if zn64_enrichment != 0.486: #if Zn64 enriched
-        if zn64_enrichment not in zn64_enrichment_map:
-            raise ValueError(f"zn64_enrichment {zn64_enrichment} not in map. Available: {list(zn64_enrichment_map.keys())}")
+        if zn64_enrichment not in ZN64_ENRICHMENT_MAP:
+            raise ValueError(f"zn64_enrichment {zn64_enrichment} not in map. Available: {list(ZN64_ENRICHMENT_MAP.keys())}")
         else:
-            fractions = zn64_enrichment_map[zn64_enrichment]
+            fractions = ZN64_ENRICHMENT_MAP[zn64_enrichment]
             total_others = sum(fractions.values())
             
             # Calculate Zn66 to ensure all fractions sum to 1.0
@@ -98,7 +75,7 @@ def create_target_material(zn64_enrichment=0.486):
             zn_64_enriched_density = 7.14 * (M_zn_64_enriched / 65.38)
             mat_outer.set_density('g/cm3', zn_64_enriched_density)
             print(f"Enriched Zn{zn64_enrichment*100:.1f}%: density = {zn_64_enriched_density:.4f} g/cm³")
-    elif zn64_enrichment == 0.486:
+    elif zn64_enrichment == 0.4917:
         mat_outer.set_density('g/cm3', 7.14)
         mat_outer.add_element('Zn', 1.0)
     mat_outer.depletable = True
@@ -545,7 +522,7 @@ def create_tallies(cells, surfaces, verbose=True):
 
     cell_filter = openmc.CellFilter([cell for cell in cells if cell.fill is not None])
 
-    pts_per_decade = 100
+    pts_per_decade = 30  # Wider bins for smoother flux spectra (was 100)
     start, stop = 1e-5, 20e6
     log_start, log_stop = np.log10(start), np.log10(stop)
     npts = int(np.ceil((log_stop - log_start) * pts_per_decade)) + 1
@@ -1153,7 +1130,7 @@ if __name__ == '__main__':
     STRUCT_THICKNESSES = [0]        # Structural material (0 = none)
     
     # Multiplier (Be) and Moderator (C) thicknesses to sweep
-    MULTI_MOD_THICKNESSES = [0, 5]  # Be multiplier = C moderator [cm]
+    MULTI_MOD_THICKNESSES = [0, 1, 2, 3, 5]  # Be multiplier = C moderator [cm]
     
     # ============================================
     # Build Job List

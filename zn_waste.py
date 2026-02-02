@@ -666,8 +666,10 @@ def read_zn65_from_simulation(sim_dir, irradiation_hours=8760, cooldown_days=0):
     volumes = compute_volumes_from_dir_name(dir_name)
     outer_volume_cm3 = volumes.get(1, 0)  # Outer target material ID = 1
     
-    # Calculate mass (Zn density ~7.14 g/cm³)
-    zn_density = 7.14  # g/cm³
+    # Get density from summary.h5 (fallback to natural Zn 7.14 g/cm³)
+    zn_density = get_material_density_from_statepoint(sp_file, material_id=1)
+    if zn_density is None:
+        zn_density = 7.14  # g/cm³ natural Zn
     zn_mass_g = outer_volume_cm3 * zn_density
     
     # Open statepoint and get reaction rates

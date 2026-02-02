@@ -24,6 +24,7 @@ from utilities import (
     apply_single_decay_step,
     compute_volumes_from_dir_name,
     get_material_density_from_statepoint,
+    get_initial_atoms_from_statepoint,
     _half_life_seconds,
 )
 
@@ -32,62 +33,6 @@ from utilities import (
 # ============================================
 OUTER_MATERIAL_ID = 1
 SOURCE_STRENGTH = 5e13  # n/s
-
-# Zn enrichment map (same as fusion_irradiation.py)
-ZN64_ENRICHMENT_MAP = {
-    0.50: {'Zn66': 0.277, 'Zn67': 0.040, 'Zn68': 0.177, 'Zn70': 0.002},
-    0.53: {'Zn66': 0.274, 'Zn67': 0.0398, 'Zn68': 0.155, 'Zn70': 0.001},
-    0.60: {'Zn66': 0.162, 'Zn67': 0.0277, 'Zn68': 0.1038, 'Zn70': 0.0008},
-    0.70: {'Zn66': 0.047, 'Zn67': 0.016, 'Zn68': 0.03, 'Zn70': 0.0007},
-    0.80: {'Zn66': 0.012, 'Zn67': 0.0043, 'Zn68': 0.014, 'Zn70': 0.0006},
-    0.90: {'Zn66': 0.007, 'Zn67': 0.0023, 'Zn68': 0.0091, 'Zn70': 0.0005},
-    0.99: {'Zn66': 0.004, 'Zn67': 0.0011, 'Zn68': 0.0031, 'Zn70': 0.0004},
-}
-
-
-def calculate_enriched_zn_density(zn64_enrichment):
-    """
-    Calculate enriched Zn density using same formula as fusion_irradiation.py.
-    
-    density = 7.14 * (M_avg / 65.38)
-    where M_avg is weighted average atomic mass of enriched mixture.
-    """
-    # Get atomic masses from OpenMC
-    try:
-        M_Zn64 = openmc.data.atomic_mass('Zn64')
-        M_Zn66 = openmc.data.atomic_mass('Zn66')
-        M_Zn67 = openmc.data.atomic_mass('Zn67')
-        M_Zn68 = openmc.data.atomic_mass('Zn68')
-        M_Zn70 = openmc.data.atomic_mass('Zn70')
-    except:
-        # Fallback to standard values
-        M_Zn64, M_Zn66, M_Zn67, M_Zn68, M_Zn70 = 63.929, 65.926, 66.927, 67.925, 69.925
-    
-    # Natural Zn composition for fallback
-    natural_frac = {'Zn66': 0.279, 'Zn67': 0.041, 'Zn68': 0.188, 'Zn70': 0.006}
-    
-    # Get fractions from map or calculate
-    if zn64_enrichment in ZN64_ENRICHMENT_MAP:
-        fracs = ZN64_ENRICHMENT_MAP[zn64_enrichment]
-    elif zn64_enrichment == 0.486:
-        # Natural composition
-        return 7.14
-    else:
-        # Interpolate or scale natural fractions
-        remaining = 1.0 - zn64_enrichment
-        scale = remaining / (1.0 - 0.486)  # Scale from natural remaining
-        fracs = {k: v * scale for k, v in natural_frac.items()}
-    
-    # Calculate weighted average atomic mass
-    M_avg = (M_Zn64 * zn64_enrichment + 
-             M_Zn66 * fracs.get('Zn66', 0) +
-             M_Zn67 * fracs.get('Zn67', 0) +
-             M_Zn68 * fracs.get('Zn68', 0) +
-             M_Zn70 * fracs.get('Zn70', 0))
-    
-    # Same formula as fusion_irradiation.py
-    density = 7.14 * (M_avg / 65.38)
-    return density
 
 
 # Analysis parameters
@@ -152,153 +97,74 @@ def find_statepoints(base_dir, pattern='radial_output_*'):
     return statepoints
 
 
-def get_initial_zn_atoms(volume_cm3, zn64_enrichment, density_g_cm3):
-    """
-    Calculate initial Zn atom counts based on volume, enrichment, and density.
-    Density should come from statepoint summary materials.
-    Uses OpenMC atomic mass data.
-    """
-    # Zn isotope fractions (natural abundance baseline)
-    # Will be modified by enrichment
-    zn_fractions = {
-        'Zn64': zn64_enrichment,
-        'Zn66': (1 - zn64_enrichment) * 0.279 / (1 - 0.486),  # Scale remaining
-        'Zn67': (1 - zn64_enrichment) * 0.041 / (1 - 0.486),
-        'Zn68': (1 - zn64_enrichment) * 0.188 / (1 - 0.486),
-        'Zn70': (1 - zn64_enrichment) * 0.006 / (1 - 0.486),
-    }
-    # Normalize
-    total_frac = sum(zn_fractions.values())
-    zn_fractions = {k: v/total_frac for k, v in zn_fractions.items()}
-    
-    # Average atomic mass
-    avg_mass = sum(zn_fractions[iso] * openmc.data.atomic_mass(iso) for iso in zn_fractions)
-    
-    # Total mass and atoms
-    total_mass_g = volume_cm3 * density_g_cm3
-    avogadro = 6.022e23
-    total_atoms = (total_mass_g / avg_mass) * avogadro
-    
-    # Initial atoms by isotope
-    initial_atoms = {iso: total_atoms * frac for iso, frac in zn_fractions.items()}
-    # Add Cu isotopes with 0 initial atoms
-    initial_atoms['Cu64'] = 0.0
-    initial_atoms['Cu67'] = 0.0
-    initial_atoms['Zn65'] = 0.0  # Not naturally present
-    initial_atoms['Zn69'] = 0.0  # Not naturally present
-    
-    return initial_atoms
-
-
 def analyze_case(sp_file):
     """
     Analyze a single simulation case.
-    Returns dict with reaction rates, geometry parameters, and material properties.
-    Density is extracted from statepoint summary (as set by fusion_irradiation.py).
+    Initial atoms and density from statepoint; reaction rates from tallies.
     """
     dir_name = os.path.basename(os.path.dirname(sp_file))
     params = parse_dir_name(dir_name)
-    
-    # Get volumes from geometry
-    try:
-        volumes = compute_volumes_from_dir_name(dir_name)
-        outer_volume = volumes.get(1, 0)
-    except:
-        outer_volume = 188495.56  # Default 20cm thickness
-    
-    # Open statepoint and get reaction rates
+    volumes = compute_volumes_from_dir_name(dir_name)
+    outer_volume = volumes.get(1, 188495.56)
+
     sp = openmc.StatePoint(sp_file)
-    rr = build_channel_rr_per_s(sp, cell_id=OUTER_MATERIAL_ID, source_strength=SOURCE_STRENGTH)
-    
-    # Get density from statepoint summary materials (set by fusion_irradiation.py)
-    # The enriched Zn density is calculated as: 7.14 * (M_avg / 65.38)
-    # where M_avg is the average atomic mass of the enriched mixture
-    zn_density = get_material_density_from_statepoint(sp, OUTER_MATERIAL_ID)
-    
+    initial_atoms = get_initial_atoms_from_statepoint(sp_file, OUTER_MATERIAL_ID, outer_volume)
+    if initial_atoms is None:
+        raise RuntimeError(f"Cannot get initial atoms from statepoint for {sp_file}")
+
+    zn_density = get_material_density_from_statepoint(sp_file, OUTER_MATERIAL_ID)
     if zn_density is None:
-        # Fallback: calculate from enrichment using same formula as fusion_irradiation.py
-        zn64_enrich = params.get('zn_enrichment', 0.486)
-        zn_density = calculate_enriched_zn_density(zn64_enrich)
-        print(f"  Warning: Using calculated density {zn_density:.4f} g/cm3 (enrich={zn64_enrich*100:.1f}%)")
-    else:
-        print(f"  Density from statepoint: {zn_density:.4f} g/cm3")
-    
-    # Calculate mass
-    zn_mass_g = outer_volume * zn_density
-    
+        raise RuntimeError(f"Cannot get density from statepoint for {sp_file}")
+
+    rr = build_channel_rr_per_s(sp, cell_id=OUTER_MATERIAL_ID, source_strength=SOURCE_STRENGTH)
+
     return {
         'dir_name': dir_name,
+        'sp_file': sp_file,
         'zn64_enrichment': params['zn_enrichment'],
         'multi_cm': params['multi'],
         'moderator_cm': params['moderator'],
         'outer_volume_cm3': outer_volume,
         'zn_density_g_cm3': zn_density,
-        'zn_mass_g': zn_mass_g,
-        'reaction_rates': rr,  # Full dict for Bateman
+        'zn_mass_g': outer_volume * zn_density,
+        'initial_atoms': initial_atoms,
+        'reaction_rates': rr,
     }
 
 
 def compute_activities(case, irrad_hours, cooldown_days):
     """
-    Compute Cu-64, Cu-67, Zn-65 activities using Bateman equation from utilities.
-    
-    Uses:
-    - evolve_bateman_irradiation() for irradiation phase (production + decay)
-    - apply_single_decay_step() for cooldown phase (decay only)
-    - OpenMC nuclear data for half-lives
-    
-    Returns dict with activities (Bq, mCi) and purities.
+    Apply evolve_bateman_irradiation + decay. Initial atoms and rxn rates from case.
     """
     irrad_s = irrad_hours * 3600
     cooldown_s = cooldown_days * 86400
-    
-    # Get initial atom counts (using density from statepoint)
-    initial_atoms = get_initial_zn_atoms(
-        case['outer_volume_cm3'], 
-        case['zn64_enrichment'],
-        case['zn_density_g_cm3']
+
+    atoms_eoi = evolve_bateman_irradiation(
+        case['initial_atoms'], case['reaction_rates'], irrad_s
     )
-    
-    # Irradiation phase: production + decay (Bateman equation)
-    atoms_eoi = evolve_bateman_irradiation(initial_atoms, case['reaction_rates'], irrad_s)
-    
-    # Cooldown phase: decay only
     atoms_final = apply_single_decay_step(atoms_eoi, cooldown_s)
-    
-    # Get decay constants for activity calculation
+
     lam_cu64 = get_decay_constant('Cu64')
     lam_cu67 = get_decay_constant('Cu67')
     lam_zn65 = get_decay_constant('Zn65')
-    
-    # Activities (Bq) = N * λ
-    cu64_Bq = atoms_final.get('Cu64', 0) * lam_cu64
-    cu67_Bq = atoms_final.get('Cu67', 0) * lam_cu67
-    zn65_Bq = atoms_final.get('Zn65', 0) * lam_zn65
-    
-    # Convert to mCi (1 Ci = 3.7e10 Bq)
-    cu64_mCi = cu64_Bq / 3.7e7
-    cu67_mCi = cu67_Bq / 3.7e7
-    zn65_mCi = zn65_Bq / 3.7e7
-    
-    # Purity: fraction of Cu that is Cu-64 or Cu-67
+
     cu64_atoms = atoms_final.get('Cu64', 0)
     cu67_atoms = atoms_final.get('Cu67', 0)
+    zn65_atoms = atoms_final.get('Zn65', 0)
     total_cu = cu64_atoms + cu67_atoms
-    cu64_purity = cu64_atoms / total_cu if total_cu > 0 else 0
-    cu67_purity = cu67_atoms / total_cu if total_cu > 0 else 0
-    
+
     return {
-        'cu64_mCi': cu64_mCi,
-        'cu67_mCi': cu67_mCi,
-        'zn65_mCi': zn65_mCi,
-        'cu64_Bq': cu64_Bq,
-        'cu67_Bq': cu67_Bq,
-        'zn65_Bq': zn65_Bq,
-        'cu64_purity': cu64_purity,
-        'cu67_purity': cu67_purity,
+        'cu64_mCi': cu64_atoms * lam_cu64 / 3.7e7,
+        'cu67_mCi': cu67_atoms * lam_cu67 / 3.7e7,
+        'zn65_mCi': zn65_atoms * lam_zn65 / 3.7e7,
+        'cu64_Bq': cu64_atoms * lam_cu64,
+        'cu67_Bq': cu67_atoms * lam_cu67,
+        'zn65_Bq': zn65_atoms * lam_zn65,
+        'cu64_purity': cu64_atoms / total_cu if total_cu > 0 else 0,
+        'cu67_purity': cu67_atoms / total_cu if total_cu > 0 else 0,
         'cu64_atoms': cu64_atoms,
         'cu67_atoms': cu67_atoms,
-        'zn65_atoms': atoms_final.get('Zn65', 0),
+        'zn65_atoms': zn65_atoms,
     }
 
 

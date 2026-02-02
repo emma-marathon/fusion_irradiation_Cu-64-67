@@ -8,6 +8,20 @@ import numpy as np
 import openmc
 
 # -------------------------------
+# Zn-64 enrichment map (single source of truth for fusion_irradiation & analysis)
+# -------------------------------
+ZN64_ENRICHMENT_MAP = {
+    0.50: {'Zn66': 0.277, 'Zn67': 0.040, 'Zn68': 0.177, 'Zn70': 0.002},
+    0.53: {'Zn66': 0.274, 'Zn67': 0.0398, 'Zn68': 0.155, 'Zn70': 0.001},
+    0.60: {'Zn66': 0.162, 'Zn67': 0.0277, 'Zn68': 0.1038, 'Zn70': 0.0008},
+    0.70: {'Zn66': 0.047, 'Zn67': 0.016, 'Zn68': 0.03, 'Zn70': 0.0007},
+    0.80: {'Zn66': 0.012, 'Zn67': 0.0043, 'Zn68': 0.014, 'Zn70': 0.0006},
+    0.90: {'Zn66': 0.007, 'Zn67': 0.0023, 'Zn68': 0.0091, 'Zn70': 0.0005},
+    0.99: {'Zn66': 0.004, 'Zn67': 0.0011, 'Zn68': 0.0031, 'Zn70': 0.0004},
+}
+NATURAL_ZN_FRACTIONS = {'Zn66': 0.279, 'Zn67': 0.041, 'Zn68': 0.188, 'Zn70': 0.0062}  # for 0.486
+
+# -------------------------------
 # Reaction channels for Zn/Cu system
 # -------------------------------
 CHANNELS = [
@@ -124,99 +138,136 @@ def compute_volumes_from_dir_name(dir_name, target_height=100.0):
         target_height=target_height
     )
 
-def get_material_density_from_statepoint(sp, material_id):
+def get_zn_fractions(zn64_enrichment):
+    """Return Zn64+others fractions from enrichment map. For natural (0.486/0.4917) use NATURAL_ZN_FRACTIONS."""
+    if zn64_enrichment in ZN64_ENRICHMENT_MAP:
+        return {'Zn64': zn64_enrichment, **ZN64_ENRICHMENT_MAP[zn64_enrichment]}
+    if zn64_enrichment in (0.486, 0.4917):
+        other_sum = sum(NATURAL_ZN_FRACTIONS.values())
+        scale = (1 - zn64_enrichment) / other_sum if other_sum > 0 else 1
+        return {'Zn64': zn64_enrichment, **{k: v * scale for k, v in NATURAL_ZN_FRACTIONS.items()}}
+    keys = sorted(ZN64_ENRICHMENT_MAP.keys(), key=lambda k: abs(k - zn64_enrichment))
+    return {'Zn64': zn64_enrichment, **ZN64_ENRICHMENT_MAP[keys[0]]}
+
+
+def calculate_enriched_zn_density(zn64_enrichment):
+    """density = 7.14 * (M_avg / 65.38). Returns 7.14 for natural."""
+    if zn64_enrichment in (0.486, 0.4917):
+        return 7.14
+    fracs = get_zn_fractions(zn64_enrichment)
+    total = sum(fracs.values())
+    fracs = {k: v / total for k, v in fracs.items()}
+    M_avg = sum(fracs[iso] * openmc.data.atomic_mass(iso) for iso in fracs)
+    return 7.14 * (M_avg / 65.38)
+
+
+def get_initial_zn_atoms_fallback(volume_cm3, zn64_enrichment, density_g_cm3):
+    """Fallback when statepoint unavailable. Uses ZN64_ENRICHMENT_MAP."""
+    fracs = get_zn_fractions(zn64_enrichment)
+    total = sum(fracs.values())
+    fracs = {k: v / total for k, v in fracs.items()}
+    avg_mass = sum(fracs[iso] * openmc.data.atomic_mass(iso) for iso in fracs)
+    total_atoms = (volume_cm3 * density_g_cm3 / avg_mass) * 6.022e23
+    initial_atoms = {iso: total_atoms * f for iso, f in fracs.items()}
+    for nuc in ('Cu64', 'Cu67', 'Zn65', 'Zn69'):
+        initial_atoms[nuc] = 0.0
+    return initial_atoms
+
+
+def get_initial_atoms_from_statepoint(path, material_id, volume_cm3):
     """
-    Extract material density (g/cm3) from statepoint summary.
-    
-    The density is set during material definition in fusion_irradiation.py
-    and stored in the statepoint summary.
+    Get initial atom counts from the material in summary.h5.
+    Uses nuclide atom densities from the simulation (no fraction guessing).
     
     Parameters
     ----------
-    sp : openmc.StatePoint
-        Opened statepoint file
+    path : str
+        Path to statepoint file or directory containing summary.h5
+    material_id : int
+        Material ID (e.g., 1 for outer Zn target)
+    volume_cm3 : float
+        Material volume in cm³
+    
+    Returns
+    -------
+    dict
+        Nuclide name -> initial atom count (float)
+    """
+    import os
+    run_dir = os.path.dirname(os.path.abspath(path)) if os.path.isfile(path) else os.path.abspath(path)
+    summary_path = os.path.join(run_dir, 'summary.h5')
+    if not os.path.exists(summary_path):
+        return None
+    try:
+        summary = openmc.Summary(summary_path)
+        mat = summary.materials[material_id]
+        nuc_densities = mat.get_nuclide_atom_densities()  # atom/b-cm
+        initial_atoms = {}
+        for nuc, dens_atom_b_cm in nuc_densities.items():
+            # atoms = volume_cm3 * (atoms/cm³) = volume_cm3 * dens_atom_b_cm * 1e24
+            initial_atoms[nuc] = float(volume_cm3 * dens_atom_b_cm * 1e24)
+        # Ensure all Zn/Cu isotopes from Bateman chain are present (0 if not in material)
+        for parent, _, daughter in CHANNELS:
+            if parent not in initial_atoms:
+                initial_atoms[parent] = 0.0
+            if daughter not in initial_atoms:
+                initial_atoms[daughter] = 0.0
+        return initial_atoms
+    except (KeyError, AttributeError, FileNotFoundError) as e:
+        print(f"  Warning: Could not get initial atoms for material {material_id}: {e}")
+        return None
+
+
+def get_material_density_from_statepoint(path, material_id):
+    """
+    Extract material density (g/cm3) from summary.h5.
+    Uses OpenMC's get_mass_density() which returns g/cm3 regardless of storage units.
+    
+    Parameters
+    ----------
+    path : str
+        Path to statepoint file (e.g. statepoint.100.h5) or directory containing summary.h5
     material_id : int
         Material ID (e.g., 1 for outer Zn target)
     
     Returns
     -------
-    float
+    float or None
         Density in g/cm3, or None if not found
     """
-    def extract_density(mat):
-        """Helper to extract density from a material object."""
-        if mat is None:
-            return None
-        # Try different ways to get density
-        if hasattr(mat, 'density'):
-            density = mat.density
-            if isinstance(density, (list, tuple)):
-                return float(density[0])
-            if density is not None:
-                return float(density)
-        # Some OpenMC versions store as get_mass_density()
-        if hasattr(mat, 'get_mass_density'):
-            try:
-                return float(mat.get_mass_density())
-            except:
-                pass
+    import os
+    run_dir = os.path.dirname(os.path.abspath(path)) if os.path.isfile(path) else os.path.abspath(path)
+    summary_path = os.path.join(run_dir, 'summary.h5')
+    if not os.path.exists(summary_path):
         return None
-    
     try:
-        # Method 1: sp.summary.materials dict (keyed by ID)
-        if hasattr(sp, 'summary') and hasattr(sp.summary, 'materials'):
-            materials = sp.summary.materials
-            
-            # Direct dict access
-            if isinstance(materials, dict):
-                if material_id in materials:
-                    d = extract_density(materials[material_id])
-                    if d is not None:
-                        return d
-            
-            # Iterate if it has values()
-            if hasattr(materials, 'values'):
-                for mat in materials.values():
-                    if hasattr(mat, 'id') and mat.id == material_id:
-                        d = extract_density(mat)
-                        if d is not None:
-                            return d
-            
-            # Iterate if it's a list
-            if hasattr(materials, '__iter__') and not isinstance(materials, dict):
-                for mat in materials:
-                    if hasattr(mat, 'id') and mat.id == material_id:
-                        d = extract_density(mat)
-                        if d is not None:
-                            return d
-        
-        # Method 2: sp.summary.geometry -> get_all_materials()
-        if hasattr(sp, 'summary') and hasattr(sp.summary, 'geometry'):
-            geom = sp.summary.geometry
-            if hasattr(geom, 'get_all_materials'):
-                all_mats = geom.get_all_materials()
-                if material_id in all_mats:
-                    d = extract_density(all_mats[material_id])
-                    if d is not None:
-                        return d
-        
-        # Method 3: Check cells for material fill
-        if hasattr(sp, 'summary') and hasattr(sp.summary, 'geometry'):
-            geom = sp.summary.geometry
-            if hasattr(geom, 'get_all_cells'):
-                cells = geom.get_all_cells()
-                for cell in cells.values():
-                    if hasattr(cell, 'fill') and hasattr(cell.fill, 'id'):
-                        if cell.fill.id == material_id:
-                            d = extract_density(cell.fill)
-                            if d is not None:
-                                return d
-        
-        print(f"  Warning: Could not find material {material_id} in statepoint summary")
-        return None
-        
-    except Exception as e:
-        print(f"  Warning: Error extracting density for material {material_id}: {e}")
+        summary = openmc.Summary(summary_path)
+        mat = summary.materials[material_id]
+        if hasattr(mat, 'get_mass_density'):
+            return float(mat.get_mass_density())
+        # Fallback: manual conversion from atom/b-cm
+        d = mat.density
+        d_val = float(d[0]) if isinstance(d, (list, tuple)) else float(d)
+        units = getattr(mat, 'density_units', 'g/cm3')
+        if isinstance(units, (list, tuple)):
+            units = units[0] if units else 'g/cm3'
+        if units in ('g/cm3', 'g/cc'):
+            return d_val
+        if units == 'kg/m3':
+            return d_val / 1000.0
+        if units in ('atom/b-cm', 'atom/cm3'):
+            from scipy.constants import Avogadro
+            nuclides = getattr(mat, 'nuclides', []) or []
+            if nuclides:
+                nuc_tuples = [(n.name, n.percent) if hasattr(n, 'name') else (n[0], n[1]) for n in nuclides]
+                M_avg = sum(frac * openmc.data.atomic_mass(nuc) for nuc, frac in nuc_tuples)
+            else:
+                M_avg = 65.38
+            N_per_cm3 = d_val * 1e24 if units == 'atom/b-cm' else d_val
+            return N_per_cm3 * M_avg / Avogadro
+        return d_val
+    except (KeyError, IndexError, AttributeError, FileNotFoundError) as e:
+        print(f"  Warning: Could not get density for material {material_id}: {e}")
         return None
 
 
