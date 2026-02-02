@@ -18,6 +18,9 @@ import numpy as np
 import glob
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches 
+from adjustText import adjust_text
+from openmc.deplete import Results
 from math import log
 from scipy.constants import Avogadro
 import openmc
@@ -29,177 +32,120 @@ import h5py
 # ---- Configuration ----
 # -------------------------------
 
-def analyze_depletion(output_dir, material_id="1", statepoint_batches=3):
+
+
+
+def export_final_composition(results, material_id='1', output_file=None):
+    if output_file is None:
+        output_file = f"final_composition_{material_id}.csv"
     """
-    Run complete depletion analysis for a given output directory.
-    
-    Parameters:
-    -----------
-    output_dir : str
-        Path to the output directory containing depletion_results.h5
+    Export final isotopic composition from OpenMC depletion results.
+
+    Works with modern OpenMC (0.14+) and CF4Integrator results that
+    lack explicit materials or nuclides metadata.
+
+    Parameters
+    ----------
+    results : openmc.deplete.Results
+        Depletion results object
     material_id : str
-        Material ID to analyze (default: "1")
-    statepoint_batches : int
-        Number of batches for statepoint file (default: 3)
+        Material ID (default: '1')
+    output_file : str
+        Path to CSV file to write
+
+    Returns
+    -------
+    pandas.DataFrame
+        Final isotopic composition table
     """
-    results_path = os.path.join(output_dir, "depletion_results.h5")
-    chain_file = os.path.join(output_dir, "JENDL_chain.xml")
-    isotopes_to_plot = [f"Zn{i}" for i in range(64, 72)]
-    cu_isotopes = [f"Cu{i}" for i in range(63, 71)]
 
-    openmc.config['chain_file'] = chain_file
+    print(" Extracting final composition...")
 
-    if not os.path.exists(results_path):
-        raise FileNotFoundError(f"Missing {results_path}")
+    # --- Identify candidate nuclides ---
+    common_nuclides = [
+        "H1", "H2", "H3", "He3", "He4",
+        "Li6", "Li7", "Be9", "B10", "B11",
+        "C12", "C13", "C14", "N14", "N15", "N16", "O16",
+        "Ne20", "Na23", "Mg24", "Al27", "Si28",
+        # EUROFER97
+        "Fe54", "Fe55", "Fe56", "Fe57", "Fe58", "Fe59", "Fe60",
+        "Cr50", "Cr51", "Cr52", "Cr53", "Cr54",
+        "W180", "W181", "W182", "W183", "W184", "W185", "W186", "W187",
+        "Mn54", "Mn55", "Mn56",
+        "Ta179", "Ta180", "Ta181", "Ta182",
+        "Ni58", "Ni60", "Ni61", "Ni62", "Ni64",
+        # Copper (all)
+        "Cu58", "Cu59", "Cu60", "Cu61", "Cu62", "Cu63", "Cu64", "Cu65",
+        "Cu66", "Cu67", "Cu68", "Cu69", "Cu70", "Cu71", "Cu72",
+        "Cu73", "Cu74", "Cu75", "Cu76", "Cu77", "Cu78", "Cu79", "Cu80", "Cu81",
+        # Zinc (all)
+        "Zn62", "Zn63", "Zn64", "Zn65", "Zn66", "Zn67", "Zn68", "Zn69", "Zn70",
+        "Zn71", "Zn72", "Zn73", "Zn74", "Zn75", "Zn76", "Zn77", "Zn78", "Zn79", "Zn80",
+        # Lanthanides
+        "Sm146", "Sm147", "Sm148", "Sm149", "Sm150", "Sm152", "Sm154",
+        "Gd147", "Gd148", "Gd149", "Gd150", "Gd151",
+        "Gd152", "Gd153", "Gd154", "Gd155", "Gd156", "Gd157", "Gd158", "Gd160",
+        "Tb159", "Tb160", "Tb161", "Tb162", "Tb163",
+    ]
 
-    # -------------------------------
-    # ---- Load depletion results ----
-    # -------------------------------
-    results = openmc.deplete.Results(results_path)
-    
-    # Get time array first (needed for all cases)
-    time = np.array(results.get_times())
-    print(f"DEBUG: time array: {time}")
-    print(f"DEBUG: time shape: {time.shape}")
-    print(f"DEBUG: Number of timesteps in file: {len(time)}")
-    time_days = time / 86400 
-    
-    # Detect when source goes to zero (cooldown phase starts)
-    try:
-        # Try to read source rates from HDF5 file
-        with h5py.File(results_path, 'r') as f:
-
-            time_steps = np.diff(time)
-            if len(time_steps) > 0:
-                # Find where timestep size jumps (cooldown starts)
-                median_step = np.median(time_steps)
-                large_steps = np.where(time_steps > median_step * 2)[0]
-                irradiation_end_idx = large_steps[0] + 1 if len(large_steps) > 0 else len(time)
-            else:
-                irradiation_end_idx = len(time)
-    except Exception as e:
-        print(f"Warning: Could not detect source transition: {e}")
-        # Fallback: assume all timesteps are irradiation
-        irradiation_end_idx = len(time)
-
-    print(f"Irradiation phase: timesteps 0 to {irradiation_end_idx-1}")
-    print(f"Cooldown phase: timesteps {irradiation_end_idx} to {len(time)-1}")
-
-    print("="*70)
-    print("OpenMC Depletion Analysis")
-    print("="*70)
-    print(f"Loaded results from: {results_path}")
-    print(f"Number of time steps: {len(time_days)}")
-    print(f"Number of irradiation time steps: {irradiation_end_idx}")
-    print(f"Number of cooldown time steps: {len(time_days) - irradiation_end_idx}")
-    if irradiation_end_idx < len(time_days):
-        print(f"Total irradiation time: {time_days[irradiation_end_idx-1]:.1f} days")
-        print(f"Total cooldown time: {time_days[-1] - time_days[irradiation_end_idx-1]:.1f} days")
-    else:
-        print(f"Total irradiation time: {time_days[-1]:.1f} days")
-    print("="*70)
-
-    # --- Robustly find all nuclides tracked ---
-    try:
-        all_nuclides = results.nuclides  # old API (<=0.14)
-    except AttributeError:
-        # new API: read directly from file
-        with h5py.File(results_path, 'r') as f:
-            all_nuclides = [n.decode() if isinstance(n, bytes) else str(n)
-                            for n in np.array(f['nuclides'])]
-
-    # Get composition AFTER IRRADIATION (end of irradiation phase)
-    irradiation_end_atoms = {}
-    irradiation_timestep = irradiation_end_idx - 1 if irradiation_end_idx > 0 else 0
-    for nuc in all_nuclides:
+    # --- Probe nuclides by attempting get_atoms() ---
+    found_nuclides = []
+    for nuc in common_nuclides:
         try:
             _, atoms = results.get_atoms(material_id, nuc)
-            if len(atoms) > irradiation_timestep and atoms[irradiation_timestep] > 0:
-                irradiation_end_atoms[nuc] = atoms[irradiation_timestep]
+            if len(atoms) > 0:
+                found_nuclides.append(nuc)
         except Exception:
             continue
 
-    # Get composition AFTER COOLDOWN (final timestep)
-    final_step_atoms = {}
-    for nuc in all_nuclides:
-        try:
-            _, atoms = results.get_atoms(material_id, nuc)
-            if atoms[-1] > 0:
-                final_step_atoms[nuc] = atoms[-1]
-        except Exception:
-            continue
-
-    if not final_step_atoms:
-        raise RuntimeError(f"No nuclides found in final step for material {material_id}")
-
-    # Export composition after irradiation
-    if irradiation_end_atoms:
-        total_atoms_irr = sum(irradiation_end_atoms.values())
-        df_irradiation = (
-            pd.DataFrame({
-                "Nuclide": list(irradiation_end_atoms.keys()),
-                "Number_of_Atoms": list(irradiation_end_atoms.values())
-            })
-            .assign(Percentage=lambda x: 100 * x["Number_of_Atoms"] / total_atoms_irr)
-            .sort_values("Number_of_Atoms", ascending=False)
+    if not found_nuclides:
+        raise RuntimeError(
+            "No nuclides could be queried from depletion results — "
+            "verify the chain file and operator setup."
         )
-        final_csv_irr = os.path.join(output_dir, "final_composition_after_irradiation.csv")
-        df_irradiation.to_csv(final_csv_irr, index=False)
-        print(f"→ Exported final composition after irradiation to {final_csv_irr}")
-        print("\nTop 10 isotopes after irradiation:")
-        print(df_irradiation.head(10).to_string(index=False))
 
-    # Export composition after cooldown
-    total_atoms = sum(final_step_atoms.values())
-    df_final = (
-        pd.DataFrame({
-            "Nuclide": list(final_step_atoms.keys()),
-            "Number_of_Atoms": list(final_step_atoms.values())
-        })
-        .assign(Percentage=lambda x: 100 * x["Number_of_Atoms"] / total_atoms)
-        .sort_values("Number_of_Atoms", ascending=False)
-    )
-    final_csv = os.path.join(output_dir, "final_composition_after_cooldown.csv")
-    df_final.to_csv(final_csv, index=False)
-    print(f"\n→ Exported final composition after cooldown to {final_csv}")
-    print("\nTop 10 isotopes after cooldown:")
-    print(df_final.head(10).to_string(index=False))
+    print(f" Found {len(found_nuclides)} candidate nuclides in results.")
 
-    return results, results_path, isotopes_to_plot, cu_isotopes, irradiation_end_idx, time_days, final_step_atoms, total_atoms, df_final
-    
-    
-
-def plot_zn_isotopes_evolution(results, output_dir, material_id="1", isotopes_to_plot=None, time_days=None, irradiation_end_idx=None):
-    # -------------------------------
-    # ---- Plot Zn isotopes evolution ----
-    # -------------------------------
-    plt.figure(figsize=(8,6))
-    for iso in isotopes_to_plot:
+    # --- Extract final composition ---
+    final_atoms = {}
+    for nuc in found_nuclides:
         try:
-            _, atoms = results.get_atoms(material_id, iso)
-            plt.semilogy(time_days, atoms, label=iso)
-        except KeyError:
+            _, atom_array = results.get_atoms(material_id, nuc)
+            if atom_array[-1] > 0:
+                final_atoms[nuc] = atom_array[-1]
+        except Exception:
             continue
 
-    # Add vertical line to mark end of irradiation / start of cooldown
-    if irradiation_end_idx is not None and irradiation_end_idx < len(time_days):
-        plt.axvline(x=time_days[irradiation_end_idx-1], color='red', linestyle='--', 
-                   linewidth=1.5, alpha=0.7, label='End of Irradiation')
-        # Add text annotation
-        plt.text(time_days[irradiation_end_idx-1], plt.ylim()[1]*0.1, 
-                'Cooldown\nstarts', ha='center', va='bottom', 
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    if not final_atoms:
+        raise ValueError("No nonzero atom densities found in final step.")
 
-    plt.xlabel("Time [days]")  # Updated to include both phases
-    plt.ylabel("Number of atoms")
-    plt.title("Evolution of Zinc Isotopes (64–72)")
-    plt.legend(ncol=2, fontsize=9)
-    plt.grid(True, which="both", ls=":")
-    plt.tight_layout()
-    zn_path = os.path.join(output_dir, "zn_isotope_evolution.png")
-    plt.savefig(zn_path, dpi=300)
-    plt.close()
-    print(f"→ Saved Zn isotope evolution plot → {zn_path}")
+    total_atoms = sum(final_atoms.values())
+
+    # --- Build DataFrame ---
+    rows = []
+    for nuc, atoms in final_atoms.items():
+        pct = 100 * atoms / total_atoms
+        try:
+            amu = openmc.data.atomic_mass(nuc)
+            mass_g = atoms * amu / Avogadro
+        except Exception:
+            amu, mass_g = None, None
+        rows.append({
+            'Nuclide': nuc,
+            'Number_of_Atoms': atoms,
+            'Percentage': pct,
+            'Mass_grams': mass_g
+        })
+
+    df = pd.DataFrame(rows).sort_values('Percentage', ascending=False)
+    df.to_csv(output_file, index=False)
+
+    print(f"\n Final composition exported to {output_file} "
+          f"({len(df)} nuclides)")
+
+    return df
+    
+    
 
 
 def plot_cu_isotopes_evolution(results, output_dir, material_id="1", cu_isotopes=None, time_days=None, irradiation_end_idx=None):
@@ -221,217 +167,443 @@ def plot_cu_isotopes_evolution(results, output_dir, material_id="1", cu_isotopes
         plt.axvline(x=time_days[irradiation_end_idx-1], color='red', linestyle='--', 
                    linewidth=1.5, alpha=0.7, label='End of Irradiation')
         # Add text annotation
-        plt.text(time_days[irradiation_end_idx-1], plt.ylim()[1]*0.1, 
+        plt.text(time_days[irradiation_end_idx-1], 1e3, 
                 'Cooldown\nstarts', ha='center', va='bottom', 
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.xlabel("Time [days]")  # Updated to include both phases
     plt.ylabel("Number of atoms")
-    plt.ylim(1e-7, 1e30)    
+    plt.ylim(1e-7, 1e18)    
     plt.title("Evolution of Copper Isotopes (63–71)")
     plt.legend(ncol=2, fontsize=9)
     plt.grid(True, which="both", ls=":")
     plt.tight_layout()
-    cu_path = os.path.join(output_dir, "cu_isotope_evolution.png")
+    cu_path = os.path.join(output_dir, f"cu_isotope_evolution{material_id}.png")
     plt.savefig(cu_path, dpi=300)
     plt.close()
-    print(f"→ Saved Cu isotope evolution plot → {cu_path}")
+    print(f"Saved Cu isotope evolution plot {cu_path}")
 
     return final_atoms_dict  # Returns final atoms after cooldown
 
-def plot_cu_isotopes_activity_evolution(results, output_dir, material_id="1", cu_isotopes=None, time_days=None, irradiation_end_idx=None):
+def plot_zn_isotopes_activity_evolution(results, output_dir, material_id_list=None, isotopes_to_plot=None, time_days=None, irradiation_end_idx=None):
     # -------------------------------
-    # ---- Plot Cu isotopes activity evolution (Irradiation Phase Only) ----
+    # ---- Plot Zn isotopes activity evolution with extended decay ----
     # -------------------------------
+    
+    # Create extended time array: original + 100 days of decay
+    final_time = time_days[-1]
+    decay_days = 100
+    n_decay_points = 100  # Number of points for decay curve
+    extended_time = np.concatenate([
+        time_days,
+        np.linspace(final_time, final_time + decay_days, n_decay_points)
+    ])
+    blue_colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(isotopes_to_plot)))
+    red_colors = plt.cm.Reds(np.linspace(0.4, 0.9, len(isotopes_to_plot)))
+    color_scheme = {}
+    
     plt.figure(figsize=(8,6))
-    _, activities = results.get_activity(material_id, units='Bq', by_nuclide=True)
-    
-    # Only plot irradiation phase (before cooldown)
-    if irradiation_end_idx is not None and irradiation_end_idx < len(activities):
-        activities = activities[:irradiation_end_idx]
-        time_plot = time_days[:irradiation_end_idx]
-    else:
-        time_plot = time_days
-    
-    total_activities = np.zeros(len(activities))
-    for iso in cu_isotopes:
-        activity = []
-        for act_dict in activities:
-            if iso in act_dict:
-                activity.append(act_dict[iso])
-                idx = activities.index(act_dict)
-                total_activities[idx] += act_dict[iso]
+    for material_id in material_id_list:
+        _, activities = results.get_activity(material_id, units='Bq', by_nuclide=True)
+        color_scheme = blue_colors if material_id == '1' else red_colors
+        
+        for iso_idx, iso in enumerate(isotopes_to_plot):
+            activity = []
+            for act_dict in activities:
+                if iso in act_dict:
+                    activity.append(act_dict[iso])
+                    idx = activities.index(act_dict)
+                else:
+                    activity.append(0.0)
+            
+            activity = np.array(activity)
+            mCi_activity = activity / 37000000
+            
+            # Get final activity value (at last time point)
+            final_activity = activity[-1] if len(activity) > 0 else 0.0
+            final_mCi_activity = final_activity / 37000000
+            
+            # Calculate decay for extended period
+            if final_activity > 0:
+                try:
+                    half_life_seconds = openmc.data.half_life(iso)
+                    if half_life_seconds is not None and np.isfinite(half_life_seconds) and half_life_seconds > 0:
+                        decay_constant = np.log(2) / half_life_seconds
+                        time_elapsed = extended_time[len(time_days):] - final_time
+                        # Exponential decay: A(t) = A₀ * exp(-λ * t)
+                        decayed_activity = final_activity * np.exp(-decay_constant * time_elapsed)
+                        decayed_mCi_activity = decayed_activity / 37000000
+                        extended_activity = np.concatenate([mCi_activity, decayed_mCi_activity])
+                    else:
+                        # Stable isotope (infinite half-life) - no decay
+                        extended_activity = np.concatenate([mCi_activity, np.full(n_decay_points, final_mCi_activity)])
+                except Exception:
+                    # If half-life lookup fails, extend with constant value
+                    extended_activity = np.concatenate([mCi_activity, np.full(n_decay_points, final_mCi_activity)])
             else:
-                activity.append(0.0)
-        
-        activity = np.array(activity)
-        
-        plt.semilogy(time_plot, activity, label=iso)
+                # No activity - extend with zeros
+                extended_activity = np.concatenate([mCi_activity, np.zeros(n_decay_points)])
+            
+                        
+            plt.semilogy(extended_time, extended_activity, label=f"{material_id} - {iso}", color=color_scheme[iso_idx], linewidth=1.5)
 
-    plt.xlabel("Irradiation time [days]")
+            # Add gray text for activity at 60 days if > 1 mCi
+            t_label = 60  # days
+            if t_label <= extended_time[-1]:
+                # Interpolate activity at 60 days
+                activity_at_60 = np.interp(t_label, extended_time, extended_activity)
+                if activity_at_60 > 1:  # Only label if > 10^0 = 1 mCi
+                    plt.text(t_label, activity_at_60, f' {activity_at_60:.1f} mCi', 
+                            fontsize=6, color='gray', va='center', ha='left')
+
+    # Add vertical line to mark end of irradiation / start of cooldown
+    if irradiation_end_idx is not None and irradiation_end_idx < len(time_days):
+        plt.axvline(x=time_days[irradiation_end_idx-1], color='red', linestyle='--', 
+                   linewidth=1.5, alpha=0.7, label='End of Irradiation')
+        # Add text annotation
+        plt.text(time_days[irradiation_end_idx-1], plt.ylim()[1]*0.1, 
+                'Cooldown\nstarts', ha='center', va='bottom', 
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    #add horizontal colored bands identifyingzones at <=2 mCi C-level, >2 <=100mCi B-level, >100mCi A-level
+    plt.axhspan(0, 2, alpha=0.2, color='green', zorder=0)      # C-level: <=2 mCi
+    plt.axhspan(2, 100, alpha=0.2, color='yellow', zorder=0)  # B-level: 2-100 mCi
+    plt.axhspan(100, 10e6, alpha=0.2, color='red', zorder=0)    # A-level: >100 mCi
+    plt.text(1, 1, 'C-level', fontsize=10, fontweight='bold', va='center')
+    plt.text(1, 10, 'B-level', fontsize=10, fontweight='bold', va='center')
+    plt.text(1, 1000, 'A-level', fontsize=10, fontweight='bold', va='center')
+
+    plt.xlabel("Time [days]")
+    plt.ylim(1e-1, 10e6)
+    plt.ylabel("Activity [mCi]")
+    plt.title("Activity Evolution of Zinc Isotopes (64–71) with >100-Day Decay Projection")
+    plt.legend(ncol=2, fontsize=9)
+    plt.grid(True, which="both", ls=":")
+    plt.tight_layout()
+    zn_activity_path = os.path.join(output_dir, f"zn_isotope_activity_evolution.png")
+    plt.savefig(zn_activity_path, dpi=300)
+    plt.close()
+    print(f"→ Saved Zn isotope activity evolution plot → {zn_activity_path}")
+
+    return
+
+def plot_zn_isotopes_SA_evolution(results, output_dir, material_id_list=None, isotopes_to_plot=None, time_days=None, irradiation_end_idx=None):
+    # -------------------------------
+    # ---- Plot Zn isotopes activity evolution with extended decay ----
+    # -------------------------------
+    
+    # Create extended time array: original + 100 days of decay
+    final_time = time_days[-1]
+    decay_days = 100
+    n_decay_points = 100  # Number of points for decay curve
+    extended_time = np.concatenate([
+        time_days,
+        np.linspace(final_time, final_time + decay_days, n_decay_points)
+    ])
+    
+    blue_colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(isotopes_to_plot)))
+    red_colors = plt.cm.Reds(np.linspace(0.4, 0.9, len(isotopes_to_plot)))
+    color_scheme = {}
+    
+    plt.figure(figsize=(8,6))
+    for material_id in material_id_list:
+        color_scheme = blue_colors if material_id == '1' else red_colors
+        total_mass = 0
+        for iso in isotopes_to_plot:
+            _, atoms = results.get_atoms(material_id, iso)
+            mass_g = (atoms *openmc.data.atomic_mass(iso)) / Avogadro
+            total_mass += mass_g
+
+        _, activities = results.get_activity(material_id, units='Bq', by_nuclide=True)
+        for iso_idx, iso in enumerate(isotopes_to_plot):
+            activity = []
+            for act_dict in activities:
+                if iso in act_dict:
+                    activity.append(act_dict[iso])
+                else:
+                    activity.append(0.0)
+            _, atoms = results.get_atoms(material_id, iso)
+            mass_g = (atoms *openmc.data.atomic_mass(iso)) / Avogadro
+            activity = np.array(activity)
+            SA = np.divide(activity, total_mass, out=np.zeros_like(activity), where=(total_mass > 0))
+            final_SA = SA[-1] if len(SA) > 0 else 0.0
+            
+            # Calculate decay for extended period
+            if final_SA > 0:
+                try:
+                    half_life_seconds = openmc.data.half_life(iso)
+                    if half_life_seconds is not None and np.isfinite(half_life_seconds) and half_life_seconds > 0:
+                        decay_constant = np.log(2) / half_life_seconds
+                        time_elapsed = extended_time[len(time_days):] - final_time
+                        # Exponential decay: A(t) = A₀ * exp(-λ * t)
+                        # final_SA is already specific activity, so just decay it directly
+                        decayed_SA = final_SA * np.exp(-decay_constant * time_elapsed)
+                        extended_SA = np.concatenate([SA, decayed_SA])
+                    else:
+                        # Stable isotope (infinite half-life) - no decay
+                        extended_SA = np.concatenate([SA, np.full(n_decay_points, final_SA)])
+                except Exception:
+                    # If half-life lookup fails, extend with constant value
+                    extended_SA = np.concatenate([SA, np.full(n_decay_points, final_SA)])
+            else:
+                # No activity - extend with zeros
+                extended_SA = np.concatenate([SA, np.zeros(n_decay_points)])
+            
+            plt.semilogy(extended_time, extended_SA, label=f"{material_id} - {iso}", color=color_scheme[iso_idx], linewidth=1.5)
+
+                        # Add gray text for activity at 60 days if > 1 mCi
+            t_label = 60  # days
+            if t_label <= extended_time[-1]:
+                # Interpolate activity at 60 days
+                SA_at_60 = np.interp(t_label, extended_time, extended_SA)
+                if SA_at_60 > 1:  # Only label if > 10^0 = 1 mCi
+                    plt.text(t_label, SA_at_60, f' {SA_at_60:.1f} mCi', 
+                            fontsize=6, color='gray', va='center', ha='left')
+
+    #add horizontal line at 0.1 Bq/g labeled Exclusion Level  
+    plt.axhline(y=0.1, color='black', linestyle='--', 
+               linewidth=1.5, alpha=0.7, label='Exclusion Level')
+    # Position text at the right side, near the exclusion line
+    x_pos = extended_time[-1] * 0.95  # Near the right edge
+    y_pos = 0.1 * 2.0  # Above the exclusion line (0.1 * 2 = 0.2)
+    plt.text(x_pos, y_pos, 
+            'Exclusion\nLevel', ha='right', va='bottom', 
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.xlabel("Time [days]")
+    plt.ylabel("Specific Activity [Bq/g]")
+    plt.title("Specific Activity Evolution of Zinc")
+    plt.legend(ncol=2, fontsize=9)
+    plt.grid(True, which="both", ls=":")
+    plt.tight_layout()
+    zn_activity_path = os.path.join(output_dir, f"zn_isotope_specific_activity_evolution.png")
+    plt.savefig(zn_activity_path, dpi=300)
+    plt.close()
+    print(f"→ Saved Zn isotope specific activity evolution plot → {zn_activity_path}")
+
+    return
+def plot_cu_isotopes_activity_evolution(results, output_dir, material_id_list=None, cu_isotopes=None, time_days=None, irradiation_end_idx=None):
+    # -------------------------------
+    # ---- Plot Cu isotopes activity evolution ----
+    # -------------------------------
+    # Create extended time array: original + 100 days of decay
+    final_time = time_days[-1]
+    decay_days = 1
+    n_decay_points = 100  # Number of points for decay curve
+    n_irr = len(time_days)
+    n_ext = n_irr + n_decay_points   
+    extended_time = np.concatenate([
+        time_days,
+        np.linspace(final_time, final_time + decay_days, n_decay_points)
+    ])
+
+    blue_colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(cu_isotopes)))
+    red_colors = plt.cm.Reds(np.linspace(0.4, 0.9, len(cu_isotopes)))
+    color_scheme = {}
+    total_activities = {material_id: [] for material_id in material_id_list}
+    activity_results = {material_id: [] for material_id in material_id_list}
+    # cooldown_activity_results removed; we extend activity_results in the same dict-per-timestep format
+    plt.figure(figsize=(8,6))
+
+    for material_id in material_id_list:
+        color_scheme = blue_colors if material_id == '1' else red_colors
+        _, activities = results.get_activity(material_id, units='Bq', by_nuclide=True)
+        sum_irr = np.zeros(n_irr, dtype=float)           # sum of all Cu (Bq) at each irradiation timestep
+        sum_cooldown = np.zeros(n_decay_points, dtype=float)  # sum of all Cu (Bq) at each cooldown timestep
+        activity_results[material_id].append(activities)
+        cooldown_time = np.linspace(0, decay_days, n_decay_points)
+        # One dict per cooldown timestep, same format as activities[t]
+        cooldown_dicts = [{} for _ in range(n_decay_points)]
+
+        for iso_idx, iso in enumerate(cu_isotopes):
+            activity = []
+            for idx, act_dict in enumerate(activities):
+                val = act_dict.get(iso, 0.0)
+                activity.append(val)
+                sum_irr[idx] += val
+
+            activity = np.array(activity)
+            mCi_activity = activity / 37000000
+            final_activity = activity[-1] if len(activity) > 0 else 0.0
+            final_mCi_activity = final_activity / 37000000
+
+            if final_activity > 0:
+                try:
+                    half_life_seconds = openmc.data.half_life(iso)
+                    if half_life_seconds is not None and np.isfinite(half_life_seconds) and half_life_seconds > 0:
+                        decay_constant = np.log(2) / half_life_seconds
+                        cooldown_activity = np.zeros(len(cooldown_time))
+                        for i in range(len(cooldown_time)):
+                            time_elapsed = cooldown_time[i] * 86400
+                            decayed_activity = final_activity * np.exp(-decay_constant * time_elapsed)
+                            cooldown_dicts[i][iso] = decayed_activity
+                            sum_cooldown[i] += decayed_activity
+                            cooldown_activity[i] = decayed_activity / 37000000
+                        extended_activity = np.concatenate([mCi_activity, cooldown_activity])
+                    else:
+                        for i in range(len(cooldown_time)):
+                            cooldown_dicts[i][iso] = final_activity
+                            sum_cooldown[i] += final_activity
+                        extended_activity = np.concatenate([mCi_activity, np.full(n_decay_points, final_mCi_activity)])
+                except Exception:
+                    for i in range(len(cooldown_time)):
+                        cooldown_dicts[i][iso] = final_activity
+                        sum_cooldown[i] += final_activity
+                    extended_activity = np.concatenate([mCi_activity, np.full(n_decay_points, final_mCi_activity)])
+            else:
+                for i in range(len(cooldown_time)):
+                    cooldown_dicts[i][iso] = 0.0
+                extended_activity = np.concatenate([mCi_activity, np.zeros(n_decay_points)])
+
+            plt.semilogy(extended_time, extended_activity, label=f"{material_id} - {iso}", color=color_scheme[iso_idx], linewidth=1.5)
+
+        # Append cooldown in the same format (list of dicts, one dict per timestep)
+        activity_results[material_id][0].extend(cooldown_dicts) 
+
+        total_activities[material_id] = np.concatenate([sum_irr, sum_cooldown]).astype(float)
+        assert total_activities[material_id].shape[0] == n_ext, (
+            "total_activities must have length n_irr+n_decay_points (109)"
+        )
+        final_total_activity = total_activities[material_id][-1] if len(total_activities[material_id]) > 0 else 0.0
+
+    # Add vertical line to mark end of irradiation / start of cooldown
+    if irradiation_end_idx is not None and irradiation_end_idx < len(time_days):
+        plt.axvline(x=time_days[irradiation_end_idx-1], color='red', linestyle='--', 
+                   linewidth=1.5, alpha=0.7, label='End of Irradiation')
+        # Add text annotation
+        plt.text(time_days[irradiation_end_idx-1], plt.ylim()[1]*0.1, 
+                'Cooldown\nstarts', ha='center', va='bottom', 
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.xlabel("Time [days]")
     plt.ylabel("Activity [Bq]")
-    plt.ylim(1e-7, 1e30)
+    plt.ylim(1e-7, 1e13)
     plt.title("Activity Evolution of Copper Isotopes (63–71) - Irradiation Phase")
     plt.legend(ncol=2, fontsize=9)
     plt.grid(True, which="both", ls=":")
     plt.tight_layout()
-    cu_activity_path = os.path.join(output_dir, "cu_isotope_activity_evolution.png")
+    cu_activity_path = os.path.join(output_dir, f"cu_isotope_activity_evolution.png")
     plt.savefig(cu_activity_path, dpi=300)
     plt.close()
     print(f"→ Saved Cu isotope activity evolution plot → {cu_activity_path}")
 
-    return total_activities
+    return total_activities, activity_results
 
-def plot_cu_isotopes_purity_evolution(results, output_dir, material_id="1", cu_isotopes=None, time_days=None, total_activities=None, irradiation_end_idx=None):
-    # -------------------------------
-    # ---- Plot Cu isotopic purity (Irradiation Phase Only) ----
-    # -------------------------------
-    _, activities = results.get_activity(material_id, units='Bq', by_nuclide=True)
-    
-    # Only plot irradiation phase (before cooldown)
-    if irradiation_end_idx is not None and irradiation_end_idx < len(activities):
-        activities = activities[:irradiation_end_idx]
-        total_activities = total_activities[:irradiation_end_idx]
-        time_plot = time_days[:irradiation_end_idx]
-    else:
-        time_plot = time_days
-    
-    plt.figure(figsize=(8,6))
-    for iso in cu_isotopes:
-        purity = []
-        for pure_dict in activities:
-            if iso in pure_dict:
-                idx = activities.index(pure_dict)
-                # Purity = activity of isotope / total activity of all isotopes
-                if total_activities[idx] > 0:
-                    purity.append(pure_dict[iso] / total_activities[idx])
+def plot_cu_isotopes_purity_evolution(results, output_dir, material_id_list=None, cu_isotopes=None, time_days=None, total_activities=None, activity_results=None, irradiation_end_idx=None):
+    if activity_results is None or total_activities is None:
+        print("Warning: plot_cu_isotopes_purity_evolution needs activity_results and total_activities from plot_cu_isotopes_activity_evolution")
+        return {}, {}
+
+    # Build extended_time (irradiation + cooldown)
+    final_time = time_days[-1]
+    decay_days = 1
+    n_decay_points = 100
+    extended_time = np.concatenate([
+        time_days,
+        np.linspace(final_time, final_time + decay_days, n_decay_points)
+    ])
+    cooldown_time = np.linspace(0, decay_days, n_decay_points)
+    blue_colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(cu_isotopes)))
+    red_colors = plt.cm.Reds(np.linspace(0.4, 0.9, len(cu_isotopes)))
+    purity_results = {mid: None for mid in material_id_list}
+    SA_results = {mid: {} for mid in material_id_list}
+
+    plt.figure(figsize=(8, 6))
+    for material_id in material_id_list:
+        color_scheme = blue_colors if material_id == '1' else red_colors
+        # Total copper mass (g)
+                # Total copper mass (g): irradiation from get_atoms; cooldown = decay of each Cu isotope
+        total_mass = 0.0
+        cooldown_masses = np.zeros(n_decay_points)   # before loop, use n_decay_points
+
+        for iso in cu_isotopes:
+            _, atoms = results.get_atoms(material_id, iso)
+            mass_per_atom = openmc.data.atomic_mass(iso) / Avogadro
+            total_mass += (atoms * openmc.data.atomic_mass(iso)) / Avogadro   # irradiation only
+
+            atoms_end = np.atleast_1d(np.asarray(atoms))[-1]
+            try:
+                half_life_seconds = openmc.data.half_life(iso)
+                if half_life_seconds is not None and np.isfinite(half_life_seconds) and half_life_seconds > 0:
+                    decay_constant = np.log(2) / half_life_seconds
+                    for i in range(n_decay_points):
+                        t_sec = cooldown_time[i] * 86400
+                        cooldown_masses[i] += atoms_end * mass_per_atom * np.exp(-decay_constant * t_sec)
                 else:
-                    purity.append(0.0)
-            else:
-                purity.append(0.0)
-        
-        purity = np.array(purity)
-        purity = 1 - purity
-        
-        plt.semilogy(time_plot, purity, label=iso)
+                    cooldown_masses[:] += atoms_end * mass_per_atom   # stable
+            except Exception:
+                cooldown_masses[:] += atoms_end * mass_per_atom
 
-    plt.xlabel("Irradiation time [days]")
-    plt.ylabel("1 - Purity (Impurity fraction, log scale)")
-    plt.title("Purity Evolution of Copper Isotopes (63–71) - Irradiation Phase")
+        total_mass = np.concatenate([np.atleast_1d(np.asarray(total_mass, dtype=float)), cooldown_masses])
+
+        # Extended activities: list of dicts, one per timestep (irradiation + cooldown)
+        list_of_dicts = activity_results[material_id][0]
+
+        tot_act = np.asarray(total_activities[material_id], dtype=float)
+        if tot_act.shape[0] != len(list_of_dicts):
+            print(f"Error: total_activities shape {tot_act.shape} does not match list_of_dicts shape {len(list_of_dicts)}")
+            tot_act = np.array([sum(d.get(iso, 0.0) for iso in cu_isotopes) for d in list_of_dicts], dtype=float)
+
+        for iso_idx, iso in enumerate(cu_isotopes):
+            # Activity (Bq) over all timesteps from imported activity_results
+            act = np.array([list_of_dicts[t].get(iso, 0.0) for t in range(len(list_of_dicts))])
+            # Specific activity = activity / total copper mass (Bq/g)
+            SA = np.divide(act, total_mass, out=np.zeros_like(act, dtype=float), where=(total_mass > 0))
+            SA_results[material_id][iso] = SA
+            plt.semilogy(extended_time, SA, label=f"{material_id} - {iso}", color=color_scheme[iso_idx], linewidth=1.5)
+
+    plt.xlabel("Time [days]")
+    plt.ylabel("Specific Activity [Bq/g]")
+    plt.title("Specific Activity Evolution of Copper Isotopes (63–71)")
     plt.legend(ncol=2, fontsize=9)
     plt.grid(True, which="both", ls=":")
     plt.tight_layout()
-    cu_purity_path = os.path.join(output_dir, "cu_isotope_purity_evolution.png")
-    plt.savefig(cu_purity_path, dpi=300)
+    plt.savefig(os.path.join(output_dir, "cu_isotope_specific_activity_evolution.png"), dpi=300)
     plt.close()
-    print(f"→ Saved Cu isotope purity evolution plot → {cu_purity_path}")
+    print("→ Saved Cu isotope specific activity evolution plot → …")
 
+    # Purity plot (1 - purity) vs extended_time — optional if you only care about final purity
+    plt.figure(figsize=(8, 6))
+    for material_id in material_id_list:
+        color_scheme = blue_colors if material_id == '1' else red_colors
+        list_of_dicts = activity_results[material_id][0]
+        tot_act = np.asarray(total_activities[material_id], dtype=float)
+        # Ensure tot_act length matches list_of_dicts (e.g. 109 = irr + cooldown); recompute from activity_results if not
+        if tot_act.shape[0] != len(list_of_dicts):
+            tot_act = np.array([sum(d.get(iso, 0.0) for iso in cu_isotopes) for d in list_of_dicts], dtype=float)
+        cu64_final, cu67_final = 0.0, 0.0
+        for iso in ['Cu64', 'Cu67']:
+            if iso not in cu_isotopes:
+                continue
+            act = np.array([list_of_dicts[t].get(iso, 0.0) for t in range(len(list_of_dicts))])
+            purity = np.divide(act, tot_act, out=np.zeros_like(act, dtype=float), where=(tot_act > 0))
+            if iso == 'Cu64':
+                cu64_final = purity[-1]
+            elif iso == 'Cu67':
+                cu67_final = purity[-1]
+            imp = np.where(1.0 - purity > 0, 1.0 - purity, 1e-30)
+            iso_idx = cu_isotopes.index(iso) if iso in cu_isotopes else 0
+            plt.semilogy(extended_time, imp, label=f"{material_id} - {iso}", color=color_scheme[iso_idx], linewidth=1.5)
+            for t_mark in [0.17, 1.0, 2.0]:
+                if t_mark < extended_time[0] or t_mark > extended_time[-1]:
+                    continue
+                y_mark = np.interp(t_mark, extended_time, imp)
+                pct = 100.0 * (1.0 - y_mark)
+                plt.plot(t_mark, y_mark, "o", color='black', markersize=4)
+                plt.text(t_mark, y_mark * 0.8, f"  {pct:.1f}%", fontsize=7, color='black', va="center")
+        purity_results[material_id] = [np.array([cu64_final]), np.array([cu67_final])]
 
-
-''''def plot_cu_isotopes_post_irradiation_activity_evolution(results, output_dir, material_id="1", cu_isotopes=None, time_days=None, total_activities=None, final_atoms_dict=None):""
-    # -------------------------------
-    # ---- Plot Cu isotopes post-irradiation activity evolution ----
-    # -------------------------------
-    post_time_hours = np.arange(0, 12 * 24 + 1, 1)  # 0 to 288 hours, 1-hour steps
-    post_time_seconds = post_time_hours * 3600
-    half_lives_seconds = {}
-
-    for iso in cu_isotopes:
-        if iso not in final_atoms_dict or final_atoms_dict[iso] <= 0:
-            continue
-        try:
-            half_life = openmc.data.half_life(iso)
-            if half_life is None:
-                half_lives_seconds[iso] = np.inf  # Stable
-            else:
-                half_lives_seconds[iso] = half_life  # Already in seconds
-        except:
-            half_lives_seconds[iso] = np.inf  # Default to stable if not found
-
-    # Create figure with three subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
-    activity_total = np.zeros(len(post_time_seconds))
-    cu64_activity = np.zeros(len(post_time_seconds))
-    cu67_activity = np.zeros(len(post_time_seconds))
-
-    # Plot 1: Atoms decay and accumulate activities
-    for iso in cu_isotopes:
-        if iso not in final_atoms_dict or final_atoms_dict[iso] <= 0:
-            continue
-        if iso not in half_lives_seconds:
-            continue
-        
-        half_life = half_lives_seconds[iso]
-        if half_life == np.inf:
-            continue  # Skip stable isotopes
-        
-        N0 = final_atoms_dict[iso]  # Initial number of atoms
-        decay_constant = np.log(2) / half_life
-        
-        # Number of atoms at time t: N(t) = N0 * exp(-λ*t)
-        atoms_post = N0 * np.exp(-decay_constant * post_time_seconds)
-        activity_post = decay_constant * atoms_post
-        
-        # Accumulate activities (add arrays directly)
-        activity_total += activity_post
-        if iso == 'Cu64':
-            cu64_activity = activity_post  # Cu64 activity (not +=, just assign)
-        if iso == 'Cu67':
-            cu67_activity = activity_post  # Cu67 activity (not +=, just assign)
-        ax1.semilogy(post_time_hours, atoms_post, label=iso)
-        ax2.semilogy(post_time_hours, activity_post, label=iso)
-
-    ax1.set_xlabel("Time after irradiation [hours]")
-    ax1.set_ylim(10e-5, 10e20)
-    ax1.set_ylabel("Number of atoms")
-    ax1.set_title("Post-Irradiation Decay of Copper Isotope Atoms (12 days)")
-    ax1.legend(ncol=2, fontsize=9)
-    ax1.grid(True, which="both", ls=":")
-
-    ax2.set_xlabel("Time after irradiation [hours]")
-    ax2.set_ylim(10e-5, 10e20)
-    ax2.set_ylabel("Activity [Bq]")
-    ax2.set_title("Post-Irradiation Activity Decay of Copper Isotopes (12 days)")
-    ax2.legend(ncol=2, fontsize=9)
-    ax2.grid(True, which="both", ls=":")
-
-    # Plot 3: Cu64 Purity
-    cu64_purity = (cu64_activity / activity_total) * 100
-    cu67_purity = (cu67_activity / activity_total) * 100
-
-    ax3.plot(post_time_hours, cu64_purity, label='Cu64', linewidth=2, color='red')
-    ax3.set_xlabel("Time after irradiation [hours]")
-    ax3.set_ylabel("Cu64 Purity [%]")
-    ax3.set_title("Cu64 Isotopic Purity Over Time")
-    ax3.grid(True, which="both", ls=":")
-    ax3.legend(fontsize=10)
-
-    # Create table data at 12-hour intervals
-    table_times_hours = np.arange(0, 120, 12)  # Every 12 hours
-    table_data = []
-    for t_hours in table_times_hours:
-        # Find closest index
-        idx = np.argmin(np.abs(post_time_hours - t_hours))
-        purity_val = cu64_purity[idx]
-        table_data.append([f"{t_hours:.0f}", f"{purity_val:.4f}"])
-
-    # Add table to the plot
-    table = ax3.table(cellText=table_data,
-                    colLabels=['Time [hours]', 'Cu64 Purity [%]'],
-                    cellLoc='center',
-                    loc='center right',
-                    bbox=[0.7, 0.02, 0.28, 0.85])
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1.7, 1)
-
+    plt.xlabel("Irradiation time [days]")
+    plt.ylabel("1 - Purity (Impurity fraction, log scale)")
+    plt.title("Cu64, Cu67 — materials 0 and 1")
+    plt.legend(ncol=2, fontsize=9)
+    plt.grid(True, which="both", ls=":")
     plt.tight_layout()
-    post_activity_path = os.path.join(output_dir, "cu_isotope_post_irradiation_decay.png")
-    plt.savefig(post_activity_path, dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "cu_isotope_purity_evolution.png"), dpi=300)
     plt.close()
-    print(f"→ Saved Cu isotope post-irradiation decay plot → {post_activity_path}")
+    print("→ Saved Cu isotope purity evolution plot")
 
-    return cu64_purity, cu67_purity, activity_total, post_time_seconds, cu64_activity, cu67_activity '''''
+    return purity_results, SA_results
 
 
 def plot_total_activity_evolution(results, output_dir, material_id="1", time_days=None):
@@ -442,12 +614,12 @@ def plot_total_activity_evolution(results, output_dir, material_id="1", time_day
         _, activity = results.get_activity(material_id)
         plt.figure(figsize=(7,5))
         plt.semilogy(time_days, activity)
-        plt.xlabel("Irradiation time [days]")
+        plt.xlabel("Time [days]")
         plt.ylabel("Total Activity [Bq]")
         plt.title("Total Activity vs. Time")
         plt.grid(True, which="both", ls=":")
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "activity_vs_time.png"), dpi=300)
+        plt.savefig(os.path.join(output_dir, f"activity_vs_time{material_id}.png"), dpi=300)
         plt.close()
         print("→ Saved activity vs time plot")
     except Exception as e:
@@ -460,831 +632,918 @@ def plot_total_activity_evolution(results, output_dir, material_id="1", time_day
         _, decay_heat = results.get_decay_heat(material_id)
         plt.figure(figsize=(7,5))
         plt.plot(time_days, decay_heat)
-        plt.xlabel("Irradiation time [days]")
+        plt.xlabel("Time [days]")
         plt.ylabel("Decay heat [W]")
         plt.title("Decay Heat vs. Time")
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "decay_heat_vs_time.png"), dpi=300)
+        plt.savefig(os.path.join(output_dir, f"decay_heat_vs_time{material_id}.png"), dpi=300)
         plt.close()
         print("→ Saved decay heat vs time plot")
     except Exception as e:
         print(f"Could not compute decay heat: {e}")
 
-''''def plot_cu_isotopes_post_irradiation_activity_evolution(results, output_dir, material_id="1", cu_isotopes=None, time_days=None, total_activities=None,):
-    # -------------------------------
-    # ---- Plot Cu isotopes post-irradiation activity evolution (from depletion cooldown phase) ----
-    # -------------------------------
-    
-    # Get all activities over entire time range
-    _, all_activities = results.get_activity(material_id, units='Bq', by_nuclide=True)
-    
-    # Calculate Cu64 and Cu67 purity over all timesteps to find peak
-    cu64_activity_all = np.zeros(len(all_activities))
-    cu67_activity_all = np.zeros(len(all_activities))
-    activity_total_all = np.zeros(len(all_activities))
-    
-    for idx, act_dict in enumerate(all_activities):
-        for iso in cu_isotopes:
-            if iso in act_dict:
-                activity_total_all[idx] += act_dict[iso]
-                if iso == 'Cu64':
-                    cu64_activity_all[idx] = act_dict[iso]
-                if iso == 'Cu67':
-                    cu67_activity_all[idx] = act_dict[iso]
-    
-    # Calculate purity over all timesteps
-    cu64_purity_all = np.zeros(len(all_activities))
-    cu67_purity_all = np.zeros(len(all_activities))
-    for idx in range(len(all_activities)):
-        if activity_total_all[idx] > 0:
-            cu64_purity_all[idx] = cu64_activity_all[idx] / activity_total_all[idx]
-            cu67_purity_all[idx] = cu67_activity_all[idx] / activity_total_all[idx]
-    
-    # Find where Cu64 purity peaks (transitions from increasing to decreasing)
-    # Use the maximum purity point as cooldown start
-    cu64_peak_idx = np.argmax(cu64_purity_all)
-    
-    # Also check Cu67 purity peak
-    cu67_peak_idx = np.argmax(cu67_purity_all)
-    
-    # Use the later of the two peaks (or Cu64 if that's the focus)
-    cooldown_start_idx = max(cu64_peak_idx, cu67_peak_idx)
-    
-    print(f"Cu64 purity peak at timestep {cu64_peak_idx} (time: {time_days[cu64_peak_idx]:.2f} days)")
-    print(f"Cu67 purity peak at timestep {cu67_peak_idx} (time: {time_days[cu67_peak_idx]:.2f} days)")
-    print(f"Using cooldown start at timestep {cooldown_start_idx} (time: {time_days[cooldown_start_idx]:.2f} days)")
-    
-    # Get cooldown phase data (from peak onwards)
-    cooldown_time_days = time_days[cooldown_start_idx:]
-    cooldown_time_hours = (cooldown_time_days - time_days[cooldown_start_idx]) * 24  # Time since peak
-    
-    # Get activities during cooldown phase
-    cooldown_activities = all_activities[cooldown_start_idx:]
-    
-    # Calculate total activity and individual isotope activities during cooldown
-    activity_total = np.zeros(len(cooldown_activities))
-    cu64_activity = np.zeros(len(cooldown_activities))
-    cu67_activity = np.zeros(len(cooldown_activities))
-    isotope_activities = {iso: np.zeros(len(cooldown_activities)) for iso in cu_isotopes}
-    isotope_atoms = {iso: [] for iso in cu_isotopes}
-    
-    # Extract activities and atoms for each isotope
-    for iso in cu_isotopes:
-        try:
-            _, atoms = results.get_atoms(material_id, iso)
-            cooldown_atoms = atoms[cooldown_start_idx:]
-            isotope_atoms[iso] = cooldown_atoms
-            
-            for idx, act_dict in enumerate(cooldown_activities):
-                if iso in act_dict:
-                    activity_val = act_dict[iso]
-                    isotope_activities[iso][idx] = activity_val
-                    activity_total[idx] += activity_val
-                    if iso == 'Cu64':
-                        cu64_activity[idx] = activity_val
-                    if iso == 'Cu67':
-                        cu67_activity[idx] = activity_val
-        except KeyError:
-            continue
-    
-    # Create figure with four subplots
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 14))
-    
-    # Plot 1: Activity evolution during cooldown
-    for iso in cu_isotopes:
-        if np.any(isotope_activities[iso] > 0):
-            ax1.semilogy(cooldown_time_hours, isotope_activities[iso], label=iso)
-    
-    ax1.set_xlabel("Time after purity peak [hours]")
-    ax1.set_ylabel("Activity [Bq]")
-    ax1.set_title("Activity Evolution of Copper Isotopes After Purity Peak")
-    ax1.legend(ncol=2, fontsize=9)
-    ax1.grid(True, which="both", ls=":")
-    
-    # Plot 2: Atoms evolution during cooldown
-    for iso in cu_isotopes:
-        if len(isotope_atoms[iso]) > 0 and np.any(isotope_atoms[iso] > 0):
-            ax2.semilogy(cooldown_time_hours, isotope_atoms[iso], label=iso)
-    
-    ax2.set_xlabel("Time after purity peak [hours]")
-    ax2.set_ylabel("Number of atoms")
-    ax2.set_title("Atoms Evolution of Copper Isotopes After Purity Peak")
-    ax2.legend(ncol=2, fontsize=9)
-    ax2.grid(True, which="both", ls=":")
-    
-    # Plot 3: Cu64 Purity (plot 1-purity on log scale)
-    cu64_purity = np.zeros(len(cooldown_time_hours))
-    for idx in range(len(cooldown_time_hours)):
-        if activity_total[idx] > 0:
-            cu64_purity[idx] = (cu64_activity[idx] / activity_total[idx])  # Fraction (0-1)
-    
-    # Plot (1-purity) on log scale to show impurities
-    one_minus_purity_cu64 = 1.0 - cu64_purity
-    ax3.semilogy(cooldown_time_hours, one_minus_purity_cu64, label='Cu64', linewidth=2, color='red')
-    ax3.set_xlabel("Time after purity peak [hours]")
-    ax3.set_ylabel("1 - Cu64 Purity (impurity fraction)")
-    ax3.set_title("Cu64 Impurity After Purity Peak (1 - Purity, log scale)")
-    ax3.grid(True, which="both", ls=":")
-    ax3.legend(fontsize=10)
-    
-    # Plot 4: Cu67 Purity (plot 1-purity on log scale)
-    cu67_purity = np.zeros(len(cooldown_time_hours))
-    for idx in range(len(cooldown_time_hours)):
-        if activity_total[idx] > 0:
-            cu67_purity[idx] = (cu67_activity[idx] / activity_total[idx])  # Fraction (0-1)
-    
-    # Plot (1-purity) on log scale to show impurities
-    one_minus_purity_cu67 = 1.0 - cu67_purity
-    ax4.semilogy(cooldown_time_hours, one_minus_purity_cu67, label='Cu67', linewidth=2, color='blue')
-    ax4.set_xlabel("Time after purity peak [hours]")
-    ax4.set_ylabel("1 - Cu67 Purity (impurity fraction)")
-    ax4.set_title("Cu67 Impurity After Purity Peak (1 - Purity, log scale)")
-    ax4.grid(True, which="both", ls=":")
-    ax4.legend(fontsize=10)
-    
-    plt.tight_layout()
-    post_activity_path = os.path.join(output_dir, "cu_isotope_cooldown_decay.png")
-    plt.savefig(post_activity_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"→ Saved Cu isotope cooldown decay plot → {post_activity_path}")
-    
-    return cu64_purity, cu67_purity, activity_total, cooldown_time_hours, cu64_activity, cu67_activity'''
 
+def plot_flux_spectra_and_heating_by_cell(statepoint_file, output_dir, time_days=None, batches=None):
+    """
+    From statepoint tallies:
+      (1) Neutron energy spectrum (volume_flux_spectra): one figure, flux vs energy,
+          one line per cell, different colors.
+      (2) Volumetric heating (volumetric_heating): CSV + one figure with all cells,
+          different colors, to compare how dangerous each cell is.
 
-def plot_most_common_reactions(results, output_dir, material_id="1", results_path=None):
-    # -------------------------------
-    # ---- Plot most common reactions that produce Cu isotopes ----
-    # -------------------------------
+    Parameters
+    ----------
+    statepoint_file : str
+        Path to statepoint (e.g. 'statepoint.2.h5' when run from output_dir).
+    output_dir : str
+        Directory for figures and CSV.
+    material_id : str
+        Material ID (default '1').
+    cells : list, optional
+        List of openmc.Cell; if provided, cell names are used for labels.
+    """
+    sp = openmc.StatePoint(statepoint_file)
+    cells = []
+    inner_thickness = float(output_dir.split("_inner")[1].split("_")[0])
+    outer_thickness = float(output_dir.split("_outer")[1].split("_")[0])
+    moderator_thickness = float(output_dir.split("_moderator")[1].split("_")[0])
+    multi_thickness = float(output_dir.split("_multi")[1].split("_")[0])
+    # cells struct_cell, inner_target_cell, outer_target_cell, moderator_cell, multi_cell
+    cells.append('struct')
+    if inner_thickness > 0:
+        cells.append('inner_target')
+    if outer_thickness > 0:
+        cells.append('outer_target')
+    if moderator_thickness > 0:
+        cells.append('moderator')
+    if multi_thickness > 0:
+        cells.append('multi')
+
+        # --- 1) Neutron energy spectrum (volume_flux_spectra): cumulative step per cell ---
     try:
-        with h5py.File(results_path, "r") as f:
-            if "reactions" in f and "reaction rates" in f:
-                # --- Load names and rate array ---
-                reaction_names = [n.decode() if isinstance(n, bytes) else str(n)
-                                for n in np.array(f["reactions"])]
-                rate_array = np.array(f["reaction rates"])  # shape: (time, mat, rxn, nuc)
-                mat_keys = list(f["materials"].keys())
-                mat_index = mat_keys.index(material_id) if material_id in mat_keys else 0
+        t = sp.get_tally(name='volume_flux_spectra')
+        edges = None
+        for f in t.filters:
+            if isinstance(f, openmc.EnergyFilter):
+                v = np.asarray(f.values)
+                edges = np.unique(np.sort(v))
+                break
+        energy_mid = (edges[:-1] + edges[1:]) / 2.0
 
-                # --- Get nuclide list to find Cu isotopes ---
-                if "nuclides" in f:
-                    nuclides = [n.decode() if isinstance(n, bytes) else str(n)
-                               for n in np.array(f["nuclides"])]
-                else:
-                    # Fallback: try to get from results object
-                    try:
-                        nuclides = results.nuclides
-                    except AttributeError:
-                        nuclides = []
-                
-                # --- Find indices of Cu isotopes (Cu63-Cu71) ---
-                cu_isotopes = [f"Cu{i}" for i in range(63, 72)]
-                cu_indices = [i for i, nuc in enumerate(nuclides) if nuc in cu_isotopes]
-                
-                if not cu_indices:
-                    print("⚠️ No Cu isotopes found in nuclide list")
-                    return
-                
-                print(f"Found {len(cu_indices)} Cu isotopes: {[nuclides[i] for i in cu_indices]}")
+        mean = np.squeeze(t.mean)
+        if mean.ndim == 1:
+            n_energy = len(energy_mid)
+            n_cells = len(mean) // n_energy
+            mean = mean.reshape(n_cells, n_energy)
+        n_cells = mean.shape[0]
 
-                # --- Integrate over time and Cu nuclides only for each reaction ---
-                # Sum over time (axis 0) and Cu nuclides (axis 3, only Cu indices)
-                # rate_array shape: (time, mat, rxn, nuc)
-                selected = rate_array[:, mat_index, :, cu_indices]  # shape: (time, rxn, n_cu)
-                # Sum over time dimension first, then over Cu isotopes
-                cu_production_rates = np.sum(selected, axis=0)  # Sum over time: (rxn, n_cu)
-                cu_production_rates = np.sum(cu_production_rates, axis=1)  # Sum over Cu isotopes: (rxn,)
-                # --- Sanity check ---
-                if len(cu_production_rates) != len(reaction_names):
-                    print(f"⚠️ Reaction count mismatch: {len(reaction_names)} names vs {len(cu_production_rates)} rates")
-                    min_len = min(len(reaction_names), len(cu_production_rates))
-                    reaction_names = reaction_names[:min_len]
-                    cu_production_rates = cu_production_rates[:min_len]
+        colors = plt.cm.tab10(np.linspace(0, 1, n_cells))
+        
+        # Calculate lethargy width for each bin: Δu = ln(E_high / E_low)
+        lethargy_width = np.log(edges[1:] / edges[:-1])
 
-                # --- Build DataFrame ---
-                df_rxn = pd.DataFrame({
-                    "Reaction": reaction_names,
-                    "Cu_Production_Rate": cu_production_rates
-                }).sort_values("Cu_Production_Rate", ascending=False)
-
-                # Filter out reactions with zero Cu production
-                df_rxn = df_rxn[df_rxn["Cu_Production_Rate"] > 0]
-
-                csv_path = os.path.join(output_dir, "reaction_summary_cu_production.csv")
-                df_rxn.to_csv(csv_path, index=False)
-                print(f"→ Exported Cu-producing reaction summary to {csv_path}")
-
-                # --- Plot top reactions that produce Cu ---
-                plt.figure(figsize=(8,5))
-                top10 = df_rxn.head(10)
-                if len(top10) > 0:
-                    plt.barh(top10["Reaction"][::-1],
-                            top10["Cu_Production_Rate"][::-1],
-                            color="steelblue")
-                    plt.xlabel("Integrated Cu Production Rate")
-                    plt.title("Top 10 Reaction Channels Producing Cu Isotopes")
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(output_dir, "top_reactions_cu_production.png"), dpi=300)
-                    plt.close()
-                    print("→ Saved top Cu-producing reaction plot")
-                else:
-                    print("⚠️ No reactions found that produce Cu isotopes")
-
-            else:
-                print("Reaction data not found in depletion_results.h5")
-
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for i in range(n_cells):
+            # Convert flux per bin to flux per unit lethargy
+            flux_per_lethargy = mean[i, :] / lethargy_width
+            ax.plot(energy_mid, flux_per_lethargy, lw=0.8, color=colors[i], label=cells[i] if i < len(cells) else f'Cell {i}')
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel("Neutron Energy [eV]")
+        ax.set_ylabel("Flux per Unit Lethargy [a.u./lethargy]")
+        ax.set_title(f"Neutron Energy Spectrum by Cell: {output_dir}")
+        ax.legend(fontsize=9, loc='upper left')
+        ax.grid(True, which="both", ls=":", alpha=0.5)
+        
+        # Set sensible x-axis limits (thermal to fusion)
+        ax.set_xlim(1e-3, 2e7)  # 1 meV to 20 MeV
+        
+        # Add reference energy annotations
+        ax.axvline(x=0.025, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+        ax.axvline(x=14.1e6, color='orange', linestyle='--', alpha=0.5, linewidth=1)
+        
+        fig.tight_layout()
+        png = os.path.join(output_dir, f"neutron_energy_spectra_by_cell_{output_dir}.png")
+        fig.savefig(png, dpi=300)
+        plt.close(fig)
+        print(f"→ Saved neutron energy spectrum by cell → {png}")
     except Exception as e:
-        print(f"Could not extract reaction summary: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Could not plot neutron energy spectrum by cell: {e}")
 
 
-### also plot top reactions by nuclide
-# -------------------------------
-# ---- Breakdown of top 10 reactions by isotope ----
-# -------------------------------
-from openmc.deplete import Chain
-import h5py
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import os
 
 
-def build_nuclide_reaction_labels(chain_path, n_rxn, n_nuc):
-    """
-    Construct (nuclide, reaction) labels to match HDF5 array dimensions.
-    Returns list of length n_rxn: ["Gd155 (n,gamma)", "Gd156 (n,2n)", ...]
-    """
-    chain = Chain.from_xml(chain_path)
-    all_pairs = []
-    for nuc in chain.nuclides:
-        for rxn in nuc.reactions:
-            all_pairs.append(f"{nuc.name} ({rxn.type})")
 
-    if len(all_pairs) >= n_rxn:
-        return all_pairs[:n_rxn]
-    else:
-        # repeat or pad if fewer available
-        from itertools import cycle
-        reps = cycle(all_pairs)
-        return [next(reps) for _ in range(n_rxn)]
+def plot_geom_purity_evolution(purity_results_list=None, output_dir_list=None, summary_output_dir=None):
 
-
-def plot_most_common_reactions_isotope_breakdown(results, output_dir, material_id="1", results_path=None):
-    try:
-        with h5py.File(results_path, "r") as f:
-            if all(k in f for k in ["reactions", "reaction rates", "nuclides"]):
-                # ---- Load nuclide names ----
-                raw_nuc = np.array(f["nuclides"])
-                nuclide_names = [n.decode() if isinstance(n, bytes) else str(n)
-                                for n in raw_nuc.flatten().tolist()]
-
-                # ---- Find Cu isotope indices ----
-                cu_isotopes = [f"Cu{i}" for i in range(63, 72)]
-                cu_indices = [i for i, nuc in enumerate(nuclide_names) if nuc in cu_isotopes]
-                
-                if not cu_indices:
-                    print("⚠️ No Cu isotopes found in nuclide list")
-                    return
-                
-                print(f"Found {len(cu_indices)} Cu isotopes: {[nuclide_names[i] for i in cu_indices]}")
-
-                # ---- Load and squeeze reaction rates ----
-                rate_array = np.squeeze(np.array(f["reaction rates"]))
-                print(f"Reaction rate array shape: {rate_array.shape}")
-                ndim = rate_array.ndim
-
-                # ---- Integrate over time ----
-                if ndim == 4:
-                    # (time, mat, reaction, nuclide)
-                    mat_keys = list(f["materials"].keys())
-                    mat_index = mat_keys.index(material_id) if material_id in mat_keys else 0
-                    # Select material and sum over time dimension
-                    selected = rate_array[:, mat_index, :, :]  # shape: (time, rxn, nuc)
-                    integrated_rxn_nuc = np.sum(selected, axis=0)  # Sum over time: (rxn, nuc)
-                elif ndim == 3:
-                    # (time, reaction, nuclide)
-                    integrated_rxn_nuc = np.sum(rate_array, axis=0)  # Sum over time: (rxn, nuc)
-                else:
-                    raise ValueError(f"Unexpected shape for reaction rates: {rate_array.shape}")
-
-                n_rxn, n_nuc = integrated_rxn_nuc.shape
-                print(f"Detected {n_rxn} reactions × {n_nuc} nuclides")
-
-                # ---- Filter Cu indices to valid range ----
-                # cu_indices are indices into nuclide_names, but we need indices < n_nuc
-                cu_indices_valid = [idx for idx in cu_indices if idx < n_nuc]
-                if len(cu_indices_valid) == 0:
-                    print("⚠️ No valid Cu isotope indices found in rate array")
-                    return
-
-                print(f"Using {len(cu_indices_valid)} valid Cu isotope indices (out of {len(cu_indices)} found)")
-
-                # ---- Filter to only reactions that produce Cu isotopes ----
-                # Sum over Cu isotope indices for each reaction
-                cu_production_per_rxn = np.sum(integrated_rxn_nuc[:, cu_indices_valid], axis=1)
-                # Only keep reactions that produce Cu
-                cu_producing_mask = cu_production_per_rxn > 0
-                cu_producing_indices = np.where(cu_producing_mask)[0]
-                
-                if len(cu_producing_indices) == 0:
-                    print("⚠️ No reactions found that produce Cu isotopes")
-                    return
-                
-                print(f"Found {len(cu_producing_indices)} reactions that produce Cu isotopes")
-                
-                # Filter integrated rates to only Cu-producing reactions
-                integrated_rxn_nuc_cu = integrated_rxn_nuc[cu_producing_indices, :]
-                cu_production_per_rxn_filtered = cu_production_per_rxn[cu_producing_indices]
-
-                # ---- Fix name mismatches ----
-                if len(nuclide_names) != n_nuc:
-                    print(f"⚠️ Nuclide name count ({len(nuclide_names)}) != {n_nuc}. Using generic labels.")
-                    nuclide_names = [f"Nuclide_{i}" for i in range(n_nuc)]
-
-                # ---- Build nuclide–reaction labels ----
-                chain_path = os.path.join(output_dir, "JENDL_chain.xml")
-                all_reaction_names = build_nuclide_reaction_labels(chain_path, n_rxn, n_nuc)
-                reaction_names = [all_reaction_names[i] for i in cu_producing_indices]
-                print(f"→ Built {len(reaction_names)} (nuclide, reaction) labels for Cu-producing reactions.")
-
-                # ---- Identify top reactions that produce Cu ----
-                top_rxn_idx = np.argsort(cu_production_per_rxn_filtered)[-10:][::-1]
-                top_reactions = [reaction_names[i] for i in top_rxn_idx]
-
-                # ---- Build tidy dataframe with Cu isotopes only ----
-                records = []
-                for r_idx in top_rxn_idx:
-                    reaction = reaction_names[r_idx]
-                    # Only include Cu isotopes in the breakdown
-                    for cu_idx in cu_indices:
-                        val = integrated_rxn_nuc_cu[r_idx, cu_idx]
-                        if val > 0:
-                            records.append({
-                                "Reaction": reaction,
-                                "Product_Nuclide": nuclide_names[cu_idx],
-                                "Cu_Production_Rate": float(val)
-                            })
-
-                df_breakdown = pd.DataFrame(records)
-
-                # ---- Group and sort ----
-                df_breakdown = (
-                    df_breakdown.sort_values(["Reaction", "Cu_Production_Rate"],
-                                            ascending=[True, False])
-                    .groupby("Reaction")
-                    .head(5)
-                    .reset_index(drop=True)
-                )
-
-                csv_path = os.path.join(output_dir, "reaction_isotope_breakdown_cu_production.csv")
-                df_breakdown.to_csv(csv_path, index=False)
-                print(f"→ Exported Cu-producing reaction–product breakdown to {csv_path}")
-
-                # ---- Color palette by reaction type ----
-                reaction_types = [r.split("(")[-1].split(")")[0] for r in df_breakdown["Reaction"]]
-                unique_types = sorted(set(reaction_types))
-                colors = plt.cm.tab10(np.linspace(0, 1, len(unique_types)))
-                color_map = dict(zip(unique_types, colors))
-
-                # ---- Plot grouped horizontal bars ----
-                plt.figure(figsize=(9,6))
-                for i, reaction in enumerate(top_reactions):
-                    subset = df_breakdown[df_breakdown["Reaction"] == reaction]
-                    if len(subset) == 0:
-                        continue
-                    rates = subset["Cu_Production_Rate"].values
-                    products = subset["Product_Nuclide"].values
-                    rx_type = reaction.split("(")[-1].split(")")[0]
-                    color = color_map.get(rx_type, "gray")
-                    left = np.cumsum(np.concatenate(([0], rates[:-1])))
-                    plt.barh([reaction]*len(rates), rates, left=left, color=color, edgecolor="black", alpha=0.8)
-                    if len(products) > 0:
-                        plt.text(np.sum(rates)*1.02, i, products[0], va='center', fontsize=8)
-
-                # ---- Final touches ----
-                plt.xlabel("Integrated Cu Production Rate")
-                plt.ylabel("Reaction (nuclide + channel)")
-                plt.title("Top 10 Cu-Producing Reactions – Cu Isotope Breakdown (Top 5 per Reaction)")
-                plt.grid(True, axis="x", ls=":", alpha=0.5)
-                plt.legend(handles=[plt.Line2D([0], [0], color=c, lw=6, label=t) for t, c in color_map.items()],
-                        title="Reaction Type", bbox_to_anchor=(1.05, 1), loc="upper left")
-                plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, "reaction_isotope_breakdown_cu_production.png"), dpi=300)
-                plt.close()
-                print("→ Saved Cu-producing reaction–product breakdown plot")
-
-            else:
-                print("⚠️ Reaction/nuclide data not found in depletion_results.h5")
-
-    except Exception as e:
-        print(f"Could not compute reaction–isotope breakdown: {e}")
-        import traceback
-        traceback.print_exc()
-
-def analyze_depletion_zn_enrichment(successful_dirs):
-    """
-    Plot Cu64 and Cu67 purity and activity evolution across different Zn-64 enrichment cases.
+    valid_dirs = [d for d in output_dir_list if d in purity_results_list and purity_results_list[d] is not None]
+    n_plots = len(valid_dirs)
     
-    Parameters:
-    -----------
-    output_dirs : list
-        List of output directory paths (e.g., ['irradiation_output_48', 'irradiation_output_50', ...])
-    zn64_enrichment_list : list
-        List of Zn-64 enrichment fractions (e.g., [0.486, 0.50, 0.60, ...])
-    """
-    print("="*70)
-    print("Analyzing Cu64/Cu67 purity and activity across Zn-64 enrichments")
-    print("="*70)
-    
-    # Dictionary to store data keyed by enrichment percentage
-    data_dict = {}
-    
-    # Process each output directory
-    for output_dir in successful_dirs:
-        # Extract enrichment percentage from directory name
-        try:
-            enrichment_pct = int(output_dir.split('_')[-1])
-            enrichment = enrichment_pct / 100.0
-        except (ValueError, IndexError):
-            print(f"Warning: Could not extract enrichment from {output_dir}, skipping...")
-            continue
-        
-        print(f"\nProcessing: {output_dir} (Zn-64 enrichment: {enrichment_pct}%)")
-        
-        # Check if results exist
-        results_path = os.path.join(output_dir, "depletion_results.h5")
-        if not os.path.exists(results_path):
-            print(f"Warning: {results_path} not found, skipping {output_dir}")
-            continue
-        
-        try:
-            # Load depletion results
-            results, results_path, isotopes_to_plot, cu_isotopes, irradiation_end_idx, time_days, final_step_atoms, total_atoms, df_final = analyze_depletion(output_dir=output_dir)
-            total_activities = plot_cu_isotopes_activity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days)
-            final_atoms_dict = plot_cu_isotopes_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days)
-            cu64_purity, cu67_purity, activity_total, post_time_seconds, cu64_activity, cu67_activity = plot_cu_isotopes_post_irradiation_activity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, total_activities=total_activities, irradiation_end_idx=irradiation_end_idx)
-            post_time_hours = post_time_seconds / 3600
-            # Store data with enrichment percentage as key
-            data_dict[enrichment_pct] = {
-                'cu64_purity': cu64_purity,
-                'cu67_purity': cu67_purity,
-                'cu64_activity': cu64_activity,
-                'cu67_activity': cu67_activity,
-                'post_time_hours': post_time_hours,
-                'enrichment': enrichment
-            }
-            
-            print(f"Successfully loaded data for {enrichment_pct}% Zn-64 enrichment")
-            
-        except Exception as e:
-            print(f"Error processing {output_dir}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-    
-    if not data_dict:
-        print("\nNo data collected. Check that output directories exist and contain depletion_results.h5")
+    if n_plots == 0:
+        print("Warning: No valid purity data found for geometry plots")
         return
     
-    print(f"\nCollected data for {len(data_dict)} enrichment cases")
-    print(f"  Enrichment levels: {sorted(data_dict.keys())}%")
+    # Calculate grid dimensions (prefer wider than tall)
+    n_cols = int(np.ceil(np.sqrt(n_plots)))
+    n_rows = int(np.ceil(n_plots / n_cols))
     
-    # Sort enrichment percentages for consistent color mapping
-    sorted_enrichments = sorted(data_dict.keys())
-    n_enrichments = len(sorted_enrichments)
+    # Color gradients
+    colors_64 = plt.cm.Blues(np.linspace(0.3, 1, 101))
+    colors_67 = plt.cm.Reds(np.linspace(0.3, 1, 101))
 
-    cu64_colors = plt.cm.Blues(np.linspace(0.4, 0.9, n_enrichments))
-    cu67_colors = plt.cm.Reds(np.linspace(0.4, 0.9, n_enrichments))
-    cu64_activity_colors = plt.cm.Purples(np.linspace(0.4, 0.9, n_enrichments))
-    cu67_activity_colors = plt.cm.Oranges(np.linspace(0.4, 0.9, n_enrichments))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 16))
+    axes = axes.flatten()  # Flatten to 1D array for easier indexing
     
-    # Create figure with two subplots: purity and activity
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    all_purity_cu67_last = []
+    all_purity_cu64_last = []
+
+    for i, output_dir in enumerate(output_dir_list):
+        if output_dir not in purity_results_list or purity_results_list[output_dir] is None:
+            print(f"Warning: plot_geom_purity_evolution: '{output_dir}' not found in purity_results_list, skipping")
+            continue
+        purity_results = purity_results_list[output_dir]
+        purity_cu67_last = purity_results['0'][1][-1]
+        purity_cu64_last = purity_results['1'][0][-1]
+        all_purity_cu67_last.append(purity_cu67_last)
+        all_purity_cu64_last.append(purity_cu64_last)
+
+    max_purity_cu67_last = np.max(all_purity_cu67_last)
+    max_purity_cu64_last = np.max(all_purity_cu64_last)
+    min_purity_cu67_last = np.min(all_purity_cu67_last)
+    min_purity_cu64_last = np.min(all_purity_cu64_last)
     
-    # Plot 1: Purity evolution
-    print("\nPlotting purity evolution...")
-    for i, enrichment_pct in enumerate(sorted_enrichments):
-        data = data_dict[enrichment_pct]
+    for i, output_dir in enumerate(output_dir_list):
+        if output_dir not in purity_results_list or purity_results_list[output_dir] is None:
+            print(f"Warning: plot_geom_purity_evolution: '{output_dir}' not found in purity_results_list, skipping")
+            continue
+        purity_results = purity_results_list[output_dir]
+        ax = axes[i]
+
+        z_inner_thickness = float(output_dir.split("_inner")[1].split("_")[0])
+        z_outer_thickness = float(output_dir.split("_outer")[1].split("_")[0])
+        struct_thickness = float(output_dir.split("_struct")[1].split("_")[0])
+        moderator_thickness = float(output_dir.split("_moderator")[1].split("_")[0])
+        multi_thickness = float(output_dir.split("_multi")[1].split("_")[0])
+
+        inner_radius = 5
+        center = (0, 0)
         
-        ax1.plot(data['post_time_hours'], data['cu64_purity'], 
-                label=f'Cu64 (Zn-64: {enrichment_pct}%)', 
-                linewidth=2.5, color=cu64_colors[i], linestyle='-')
-        ax1.plot(data['post_time_hours'], data['cu67_purity'], 
-                label=f'Cu67 (Zn-64: {enrichment_pct}%)', 
-                linewidth=2.5, color=cu67_colors[i], linestyle='--', alpha=0.8)
-    
-    ax1.set_xlabel("Time after irradiation [hours]", fontsize=11)
-    ax1.set_ylabel("Isotopic Purity [%]", fontsize=11)
-    ax1.set_title("Cu64 and Cu67 Purity Evolution vs. Zn-64 Enrichment Level", fontsize=12, fontweight='bold')
-    ax1.legend(ncol=2, fontsize=9, loc='best', framealpha=0.9)
-    ax1.grid(True, which="both", ls=":", alpha=0.5)
-    ax1.set_xlim(0, 120)  # Show first 120 hours
-    
-    # Plot 2: Activity evolution
-    print("Plotting activity evolution...")
-    for i, enrichment_pct in enumerate(sorted_enrichments):
-        data = data_dict[enrichment_pct]
+        # Get purity values at last timestep
+        purity_cu67_last = purity_results['0'][1][-1]  # Material '0', Cu67 (index 1), last timestep
+        purity_cu64_last = purity_results['1'][0][-1]  # Material '1', Cu64 (index 0), last timestep
         
-        # Plot Cu64 activity (purples)
-        ax2.semilogy(data['post_time_hours'], data['cu64_activity'], 
-                    label=f'Cu64 (Zn-64: {enrichment_pct}%)', 
-                    linewidth=2.5, color=cu64_activity_colors[i], linestyle='-')
+        # Blue: Map 97-99.8% (0.97-0.998) to 0-100 (dull to vibrant)
+        def blue_purity_to_color_index(purity):
+            if purity < min_purity_cu64_last:
+                return 0  # Dull for < 97%
+            elif purity > max_purity_cu64_last:
+                return 100  # Max vibrant for > 99.8%
+            else:
+                # Map 0.97-0.998 to 0-100
+                index = int((purity - min_purity_cu64_last) / (max_purity_cu64_last - min_purity_cu64_last) * 100)
+                return min(max(index, 0), 100)
+
+        # Red: Map 1-3% (0.01-0.03) to 0-100 (dull to vibrant)
+        def red_purity_to_color_index(purity):
+            if purity < min_purity_cu67_last:
+                return 0  # Dull for < 1%
+            elif purity > max_purity_cu67_last:
+                return 100  # Max vibrant for > 3%
+            else:
+                # Map 0.01-0.03 to 0-100
+                index = int((purity - min_purity_cu67_last) / (max_purity_cu67_last - min_purity_cu67_last) * 100)
+                return min(max(index, 0), 100)
         
-        # Plot Cu67 activity (oranges)
-        ax2.semilogy(data['post_time_hours'], data['cu67_activity'], 
-                    label=f'Cu67 (Zn-64: {enrichment_pct}%)', 
-                    linewidth=2.5, color=cu67_activity_colors[i], linestyle='--', alpha=0.8)
-    
-    ax2.set_xlabel("Time after irradiation [hours]", fontsize=11)
-    ax2.set_ylabel("Activity [Bq]", fontsize=11)
-    ax2.set_title("Cu64 and Cu67 Activity Evolution vs. Zn-64 Enrichment Level", fontsize=12, fontweight='bold')
-    ax2.legend(ncol=2, fontsize=9, loc='best', framealpha=0.9)
-    ax2.grid(True, which="both", ls=":", alpha=0.5)
-    ax2.set_xlim(0, 120)  # Show first 120 hours
-    
-    plt.tight_layout()
-    
-    # Save plot
-    output_path = "cu64_cu67_enrichment_comparison.png"
+        color_idx_64 = blue_purity_to_color_index(purity_cu64_last)
+        color_idx_67 = red_purity_to_color_index(purity_cu67_last)
+
+        # Draw circles for reference (outlines only)
+        radii = [
+            inner_radius,
+            inner_radius + struct_thickness,
+            inner_radius + struct_thickness + z_inner_thickness,
+            inner_radius + struct_thickness + z_inner_thickness + multi_thickness,
+            inner_radius + struct_thickness + z_inner_thickness + multi_thickness + moderator_thickness,
+            inner_radius + struct_thickness + z_inner_thickness + multi_thickness + moderator_thickness + z_outer_thickness
+        ]
+        
+        labels = ['Inner', 'Struct', 'Z inner', 'Multi', 'Moderator', 'Z outer']
+        for r, label in zip(radii, labels):
+            circle = mpatches.Circle(center, r, fill=False, edgecolor='black', linestyle='--', linewidth=0.5)
+            ax.add_patch(circle)
+
+        # Draw annulus for Z inner (Cu67 purity)
+        r_inner_z = inner_radius + struct_thickness
+        r_outer_z = inner_radius + struct_thickness + z_inner_thickness
+        annulus_z = mpatches.Annulus(center, r_outer_z, r_outer_z - r_inner_z, color=colors_67[color_idx_67])
+        ax.add_patch(annulus_z)
+
+        # Draw annulus for Z outer (Cu64 purity)
+        r_inner_z_outer = inner_radius + struct_thickness + z_inner_thickness + multi_thickness + moderator_thickness
+        r_outer_z_outer = r_inner_z_outer + z_outer_thickness
+        annulus_z_outer = mpatches.Annulus(center, r_outer_z_outer, r_outer_z_outer - r_inner_z_outer, color=colors_64[color_idx_64])
+        ax.add_patch(annulus_z_outer)
+        
+        # Set equal aspect ratio and axis limits
+        ax.set_aspect('equal')
+        max_radius = radii[-1] * 1.1
+        ax.set_xlim(-max_radius, max_radius)
+        ax.set_ylim(-max_radius, max_radius)
+        # Improve title alignment with better spacing
+        ax.set_title(f'{output_dir}\nCu67: {purity_cu67_last*100:.2f}%, Cu64: {purity_cu64_last*100:.2f}%', 
+                    pad=5, fontsize=6)
+
+    plt.tight_layout(pad=2.0)
+    out_dir = summary_output_dir if summary_output_dir is not None else (output_dir_list[0] if output_dir_list else ".")
+    output_path = os.path.join(out_dir, "geom_purity_evolution.png")  
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved comparison plot → {output_path}")
-    print("="*70)
-    
-    # =====================================================================
-    # Export data to Excel for comparison
-    # =====================================================================
-    print("\nExporting data to CSV...")
-    
-    # Create DataFrame with time and all data columns
-    df_data = {'Time [hours]': data_dict[sorted_enrichments[0]]['post_time_hours']}
-    
-    # Add all columns for each enrichment
-    for enrichment_pct in sorted_enrichments:
-        data = data_dict[enrichment_pct]
-        df_data[f'Cu64_Purity_Zn{enrichment_pct}%'] = data['cu64_purity']
-        df_data[f'Cu67_Purity_Zn{enrichment_pct}%'] = data['cu67_purity']
-        df_data[f'Cu64_Activity_Zn{enrichment_pct}%'] = data['cu64_activity']
-        df_data[f'Cu67_Activity_Zn{enrichment_pct}%'] = data['cu67_activity']
-    
-    # Export to CSV
-    df = pd.DataFrame(df_data)
-    csv_path = "cu64_cu67_enrichment_comparison.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"→ Exported comparison data to {csv_path}")
-    print("="*70)
+    print(f"→ Saved geom purity evolution → {output_path}")
 
 
-
-
-def main():
-    # Automatically discover available enrichment cases from output directories
-    print("="*70)
-    print("Discovering available enrichment cases from output directories...")
-    print("="*70)
+def plot_geom_activity_evolution(activity_results_list=None, output_dir_list=None, summary_output_dir=None):
     
-    # Find all irradiation_output_* directories
-    output_dir_pattern = "irradiation_output_*"
-    found_dirs = sorted([d for d in glob.glob(output_dir_pattern) if os.path.isdir(d)])
+    valid_dirs = [d for d in output_dir_list if d in activity_results_list and activity_results_list[d] is not None]
+    n_plots = len(valid_dirs)
     
-    if not found_dirs:
-        print("No irradiation_output_* directories found!")
-        print("   Make sure you've run fusion_irradiation.py first.")
+    if n_plots == 0:
+        print("Warning: No valid purity data found for geometry plots")
         return
     
-    # Extract enrichment percentages and create enrichment list
-    zn64_enrichment_list = []
-    zn67_enrichment_list = []
-    output_dirs = []
+    # Calculate grid dimensions (prefer wider than tall)
+    n_cols = int(np.ceil(np.sqrt(n_plots)))
+    n_rows = int(np.ceil(n_plots / n_cols))
     
-    for dir_path in found_dirs:
-        try:
-            # Extract enrichment percentages from directory name
-            # New format: "irradiation_output_48_26" -> Zn64=48%, Zn67=26%
-            # Old format: "irradiation_output_50" -> Zn64=50%, Zn67=natural (0.2663)
-            parts = dir_path.split('_')
-            
-            if len(parts) >= 4:
-                # New format with both enrichments
-                zn64_pct = int(parts[-2])
-                zn67_pct = int(parts[-1])
-                zn64_enrichment = zn64_pct / 100.0
-                zn67_enrichment = zn67_pct / 100.0
-                zn64_enrichment_list.append(zn64_enrichment)
-                zn67_enrichment_list.append(zn67_enrichment)
-                output_dirs.append(dir_path)
-                print(f"  Found: {dir_path} (Zn-64: {zn64_pct}%, Zn-67: {zn67_pct}%)")
+    # Color gradients
+    colors_64 = plt.cm.Greens(np.linspace(0.3, 1, 101))
+    colors_67 = plt.cm.RdPu(np.linspace(0.3, 1, 101))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 16))
+    axes = axes.flatten()  # Flatten to 1D array for easier indexing
+    all_activity_cu67_last = []
+    all_activity_cu64_last = []
+    for i, output_dir in enumerate(output_dir_list):
+        if output_dir not in activity_results_list or activity_results_list[output_dir] is None:
+            print(f"Warning: plot_geom_activity_evolution: '{output_dir}' not found in activity_results_list, skipping")
+            continue
+        activity_results = activity_results_list[output_dir]
+        activity_cu67_last = activity_results['0'][0][-1]['Cu67'] # ['0'] material_id, [0] list of dicts, [-1] last timestep, {'Cu67': activity}[0] -> activity
+        activity_cu64_last = activity_results['1'][0][-1]['Cu64'] # ['1'] material_id, [0] list of dicts, [-1] last timestep, {'Cu64': activity}[0] -> activity
+        all_activity_cu67_last.append(activity_cu67_last)
+        all_activity_cu64_last.append(activity_cu64_last)
+    max_activity_cu67_last = np.max(all_activity_cu67_last)
+    max_activity_cu64_last = np.max(all_activity_cu64_last)
+    min_activity_cu67_last = np.min(all_activity_cu67_last)
+    min_activity_cu64_last = np.min(all_activity_cu64_last)
+
+    
+    for i, output_dir in enumerate(output_dir_list):
+        if output_dir not in activity_results_list or activity_results_list[output_dir] is None:
+            print(f"Warning: plot_geom_activity_evolution: '{output_dir}' not found in activity_results_list, skipping")
+            continue
+        activity_results = activity_results_list[output_dir]
+        ax = axes[i]
+
+        z_inner_thickness = float(output_dir.split("_inner")[1].split("_")[0])
+        z_outer_thickness = float(output_dir.split("_outer")[1].split("_")[0])
+        struct_thickness = float(output_dir.split("_struct")[1].split("_")[0])
+        moderator_thickness = float(output_dir.split("_moderator")[1].split("_")[0])
+        multi_thickness = float(output_dir.split("_multi")[1].split("_")[0])
+
+        inner_radius = 5
+        center = (0, 0)
+        
+        # Get purity values at last timestep
+        activity_cu67_last = activity_results['0'][0][-1]['Cu67']  # ['0'] material_id, [0] list of dicts, [-1] last timestep, {'Cu67': activity}[0] -> activity
+        activity_cu64_last = activity_results['1'][0][-1]['Cu64']  # ['1'] material_id, [0] list of dicts, [-1] last timestep, {'Cu64': activity}[0] -> activity
+        
+        # Green: Map activity to 0-100 based on min/max Cu64 activity
+        def green_activity_to_color_index(activity):
+            if activity <= min_activity_cu64_last:
+                return 0  # Dullest for min activity
+            elif activity >= max_activity_cu64_last:
+                return 100  # Brightest for max activity
             else:
+                # Map min-max to 0-100
+                index = int((activity - min_activity_cu64_last) / (max_activity_cu64_last - min_activity_cu64_last) * 100)
+                return min(max(index, 0), 100)
+
+        # Pink: Map activity to 0-100 based on min/max Cu67 activity
+        def pink_activity_to_color_index(activity):
+            if activity <= min_activity_cu67_last:
+                return 0  # Dullest for min activity
+            elif activity >= max_activity_cu67_last:
+                return 100  # Brightest for max activity
+            else:
+                # Map min-max to 0-100
+                index = int((activity - min_activity_cu67_last) / (max_activity_cu67_last - min_activity_cu67_last) * 100)
+                return min(max(index, 0), 100)
+        
+        color_idx_64 = green_activity_to_color_index(activity_cu64_last)
+        color_idx_67 = pink_activity_to_color_index(activity_cu67_last)
+
+        # Draw circles for reference (outlines only)
+        radii = [
+            inner_radius,
+            inner_radius + struct_thickness,
+            inner_radius + struct_thickness + z_inner_thickness,
+            inner_radius + struct_thickness + z_inner_thickness + multi_thickness,
+            inner_radius + struct_thickness + z_inner_thickness + multi_thickness + moderator_thickness,
+            inner_radius + struct_thickness + z_inner_thickness + multi_thickness + moderator_thickness + z_outer_thickness
+        ]
+        
+        labels = ['Inner', 'Struct', 'Z inner', 'Multi', 'Moderator', 'Z outer']
+        for r, label in zip(radii, labels):
+            circle = mpatches.Circle(center, r, fill=False, edgecolor='black', linestyle='--', linewidth=0.5)
+            ax.add_patch(circle)
+
+        # Draw annulus for Z inner (Cu67 purity)
+        r_inner_z = inner_radius + struct_thickness
+        r_outer_z = inner_radius + struct_thickness + z_inner_thickness
+        annulus_z = mpatches.Annulus(center, r_outer_z, r_outer_z - r_inner_z, color=colors_67[color_idx_67])
+        ax.add_patch(annulus_z)
+
+        # Draw annulus for Z outer (Cu64 purity)
+        r_inner_z_outer = inner_radius + struct_thickness + z_inner_thickness + multi_thickness + moderator_thickness
+        r_outer_z_outer = r_inner_z_outer + z_outer_thickness
+        annulus_z_outer = mpatches.Annulus(center, r_outer_z_outer, r_outer_z_outer - r_inner_z_outer, color=colors_64[color_idx_64])
+        ax.add_patch(annulus_z_outer)
+        
+        # Set equal aspect ratio and axis limits
+        ax.set_aspect('equal')
+        max_radius = radii[-1] * 1.1
+        ax.set_xlim(-max_radius, max_radius)
+        ax.set_ylim(-max_radius, max_radius)
+        # Improve title alignment with better spacing
+        activity_cu67_last_Ci = activity_cu67_last * 1.0 / 3.7e10
+        activity_cu64_last_Ci = activity_cu64_last * 1.0 / 3.7e10
+        ax.set_title(f'{output_dir}\nCu67: {activity_cu67_last_Ci:.2f} Ci, Cu64: {activity_cu64_last_Ci:.2f} Ci', 
+                    pad=5, fontsize=6)
+
+    plt.tight_layout(pad=2.0)
+    out_dir = summary_output_dir if summary_output_dir is not None else (output_dir_list[0] if output_dir_list else ".")
+    output_path = os.path.join(out_dir, "geom_activity_evolution.png")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"→ Saved geom activity evolution → {output_path}")
+    
+def plot_production_vs_purity(purity_results_list=None, activity_results_list=None, output_dir_list=None, summary_output_dir=None):
+    """
+    Simple labeled point plot of production vs purity for all output directories.
+    Left plot: Cu64 in outer breeding module (material '1') - cool tones
+    Right plot: Cu67 in inner breeding module (material '0') - warm tones
+    """
+    # Get valid directories
+    valid_dirs = []
+    for d in output_dir_list:
+        if (d in purity_results_list and purity_results_list[d] is not None and
+            d in activity_results_list and activity_results_list[d] is not None):
+            valid_dirs.append(d)
+    
+    if len(valid_dirs) == 0:
+        print("Warning: No valid data found for production vs purity plots")
+        return
+    
+    # Collect data at 1 day
+    cu64_purities = []
+    cu64_activities = []
+    cu67_purities = []
+    cu67_activities = []
+    labels = []
+    
+    for output_dir in valid_dirs:
+        try:
+            # Get activity at 1 day
+            activity_results = activity_results_list[output_dir]
+            # activity_results[material_id] is a list: [activities] where activities is list of dicts
+            if '1' in activity_results and activity_results['1'] and len(activity_results['1']) > 0:
+                activities_list = activity_results['1'][0]  # Get list of dicts
+                activity_cu64 = activities_list[-1].get('Cu64', 0.0)  
+            else:
+                activity_cu64 = 0.0
+            
+            if '0' in activity_results and activity_results['0'] and len(activity_results['0']) > 0:
+                activities_list = activity_results['0'][0]  # Get list of dicts
+                activity_cu67 = activities_list[-1].get('Cu67', 0.0)  
+            else:
+                activity_cu67 = 0.0
+            
+            # Get purity at 1 day
+            purity_results = purity_results_list[output_dir]
+            # purity_results[material_id] is a list: [Cu64_array, Cu67_array]
+            if '1' in purity_results and purity_results['1'] and len(purity_results['1']) > 0:
+                cu64_purity_array = purity_results['1'][0]  # Cu64 is at index 0
+                purity_cu64 = cu64_purity_array[-1]  
+            else:
+                purity_cu64 = 0.0
+            
+            if '0' in purity_results and purity_results['0'] and len(purity_results['0']) > 1:
+                cu67_purity_array = purity_results['0'][1]  # Cu67 is at index 1
+                purity_cu67 = cu67_purity_array[-1]  
+            else:
+                purity_cu67 = 0.0
+            
+            # Convert activity to Curies
+            Bq_to_Ci = 1.0 / 3.7e10
+            activity_cu64_Ci = activity_cu64 * Bq_to_Ci
+            activity_cu67_Ci = activity_cu67 * Bq_to_Ci
+            
+            cu64_purities.append(purity_cu64 * 100)  # Convert to percentage
+            cu64_activities.append(activity_cu64_Ci)
+            cu67_purities.append(purity_cu67 * 100)  # Convert to percentage
+            cu67_activities.append(activity_cu67_Ci)
+            
+            # Create simple label from directory name
+            label = output_dir.replace("irr_output_", "").replace("_", " ")
+            labels.append(label)
+        except Exception as e:
+            print(f"Warning: Error processing {output_dir}: {e}")
+            continue
+    
+    if len(cu64_purities) == 0:
+        print("Warning: No valid data points collected")
+        return
+    
+    # Create two subplots: Cu64 (left, cool tones) and Cu67 (right, warm tones)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Cool color palette for Cu64 (outer, material '1')
+    cool_colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(cu64_purities)))
+    
+    # Warm color palette for Cu67 (inner, material '0')
+    warm_colors = plt.cm.Reds(np.linspace(0.4, 0.9, len(cu67_purities)))
+    
+    # Plot Cu64 (left, cool tones)
+    texts1 = []
+    for i, (purity, activity, label) in enumerate(zip(cu64_purities, cu64_activities, labels)):
+        ax1.scatter(purity, activity, c=[cool_colors[i]], s=150, alpha=0.7, 
+                   edgecolors='darkblue', linewidth=1.5)
+        # Add text label
+        t = ax1.annotate(label, (purity, activity), fontsize=5, alpha=0.8, 
+                    xytext=(5, 5), textcoords='offset points', ha='left')
+        texts1.append(t)
+    adjust_text(texts1, ax=ax1)
+    ax1.set_xlabel('Cu64 Purity [%]', fontsize=12)
+    ax1.set_ylabel('Cu64 Production [Ci]', fontsize=12)
+    ax1.set_title('Cu64 Production vs Purity (Outer Breeding Module)', fontsize=14, fontweight='bold')
+    ax1.grid(True, which='both', alpha=0.4, linestyle='--')
+    if min(cu64_purities) > 0:
+        ax1.set_xscale('log')
+    ax1.set_yscale('log')
+    ax1.xaxis.set_major_formatter(plt.ScalarFormatter())
+    ax1.xaxis.get_major_formatter().set_scientific(False)
+    
+    # Plot Cu67 (right, warm tones)
+    texts2 = []
+    for i, (purity, activity, label) in enumerate(zip(cu67_purities, cu67_activities, labels)):
+        ax2.scatter(purity, activity, c=[warm_colors[i]], s=150, alpha=0.7, 
+                   edgecolors='darkred', linewidth=1.5)
+        # Add text label
+        t = ax2.annotate(label, (purity, activity), fontsize=7, alpha=0.8, 
+                    xytext=(5, 5), textcoords='offset points', ha='left')
+        texts2.append(t)
+    adjust_text(texts2, ax=ax2)
+    ax2.set_xlabel('Cu67 Purity [%]', fontsize=12)
+    ax2.set_ylabel('Cu67 Production [Ci]', fontsize=12)
+    ax2.set_title('Cu67 Production vs Purity (Inner Breeding Module)', fontsize=14, fontweight='bold')
+    ax2.grid(True, which='both', alpha=0.4, linestyle='--')
+    if min(cu67_purities) > 0:
+        ax2.set_xscale('log')
+    ax2.set_yscale('log')
+    ax2.xaxis.set_major_formatter(plt.ScalarFormatter())
+    ax2.xaxis.get_major_formatter().set_scientific(False)
+    
+    plt.tight_layout()
+    out_dir = summary_output_dir if summary_output_dir is not None else (output_dir_list[0] if output_dir_list else ".")
+    output_path = os.path.join(out_dir, "production_vs_purity_1day.png")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"→ Saved production vs purity at 1 day → {output_path}")
+
+def plot_geom_prod_vs_purity(purity_results_list=None, activity_results_list=None, output_dir_list=None, summary_output_dir=None):
+    """
+    Plot production vs purity as a function of geometry parameters.
+    2 columns (Cu64 external, Cu67 internal) x 4 rows (inner, outer, multi, moderator).
+    Each row shows how production vs purity changes when varying one parameter (others at minimum).
+    """
+    # Get valid directories and parse geometry parameters
+    valid_dirs = []
+    geometry_params = []  # List of dicts: {inner, outer, multi, moderator, dir_name}
+    
+    for d in output_dir_list:
+        if (d in purity_results_list and purity_results_list[d] is not None and
+            d in activity_results_list and activity_results_list[d] is not None):
+            try:
+                # Parse parameters from directory name
+                z_inner = float(d.split("_inner")[1].split("_")[0])
+                z_outer = float(d.split("_outer")[1].split("_")[0])
+                struct = float(d.split("_struct")[1].split("_")[0])
+                multi = float(d.split("_multi")[1].split("_")[0])
+                moderator = float(d.split("_moderator")[1].split("_")[0])
+                
+                valid_dirs.append(d)
+                geometry_params.append({
+                    'inner': z_inner,
+                    'outer': z_outer,
+                    'struct': struct,
+                    'multi': multi,
+                    'moderator': moderator,
+                    'dir': d
+                })
+            except Exception as e:
+                print(f"Warning: Could not parse geometry from {d}: {e}")
                 continue
-        except (ValueError, IndexError) as e:
-            print(f"  Warning: Could not extract enrichment from {dir_path}, skipping... ({e})")
+    
+    if len(valid_dirs) == 0:
+        print("Warning: No valid data found for geometry production vs purity plots")
+        return
+    
+    # Find minimum values for each parameter
+    min_inner = min(p['inner'] for p in geometry_params)
+    min_outer = min(p['outer'] for p in geometry_params)
+    min_struct = min(p['struct'] for p in geometry_params)
+    min_multi = min(p['multi'] for p in geometry_params)
+    min_moderator = min(p['moderator'] for p in geometry_params)
+    
+    # Group directories by which parameter is varying (others at minimum)
+    def is_at_min(params, param_name):
+        """Check if all parameters except param_name are at minimum"""
+        for key, val in params.items():
+            if key == param_name or key == 'dir':
+                continue
+            min_val = {'inner': min_inner, 'outer': min_outer, 'struct': min_struct,
+                      'multi': min_multi, 'moderator': min_moderator}[key]
+            if abs(val - min_val) > 0.01:  # Small tolerance for float comparison
+                return False
+        return True
+    
+    inner_varying = [p for p in geometry_params if is_at_min(p, 'inner')]
+    outer_varying = [p for p in geometry_params if is_at_min(p, 'outer')]
+    multi_varying = [p for p in geometry_params if is_at_min(p, 'multi')]
+    moderator_varying = [p for p in geometry_params if is_at_min(p, 'moderator')]
+    
+    # Extract data for each group
+    def extract_data(param_list, param_name):
+        """Extract purity and activity data for a parameter group"""
+        purities_cu64 = []
+        activities_cu64 = []
+        purities_cu67 = []
+        activities_cu67 = []
+        param_values = []
+        
+        for params in sorted(param_list, key=lambda x: x[param_name]):
+            output_dir = params['dir']
+            try:
+                # Get activity at 1 day
+                activity_results = activity_results_list[output_dir]
+                
+                # Cu64 (material '1', outer)
+                if '1' in activity_results and activity_results['1'] and len(activity_results['1']) > 0:
+                    activities_list = activity_results['1'][0]
+                    activity_cu64 = activities_list[-1].get('Cu64', 0.0)  
+                else:
+                    activity_cu64 = 0.0
+                
+                # Cu67 (material '0', inner)
+                if '0' in activity_results and activity_results['0'] and len(activity_results['0']) > 0:
+                    activities_list = activity_results['0'][0]
+                    activity_cu67 = activities_list[-1].get('Cu67', 0.0)  
+                else:
+                    activity_cu67 = 0.0
+                
+                # Get purity at 1 day
+                purity_results = purity_results_list[output_dir]
+                
+                # Cu64 purity (material '1', index 0)
+                if '1' in purity_results and purity_results['1'] and len(purity_results['1']) > 0:
+                    cu64_purity_array = purity_results['1'][0]
+                    purity_cu64 = cu64_purity_array[-1]  
+                else:
+                    purity_cu64 = 0.0
+                
+                # Cu67 purity (material '0', index 1)
+                if '0' in purity_results and purity_results['0'] and len(purity_results['0']) > 1:
+                    cu67_purity_array = purity_results['0'][1]
+                    purity_cu67 = cu67_purity_array[-1]  
+                else:
+                    purity_cu67 = 0.0
+                
+                # Convert activity to Curies
+                Bq_to_Ci = 1.0 / 3.7e10
+                activity_cu64_Ci = activity_cu64 * Bq_to_Ci
+                activity_cu67_Ci = activity_cu67 * Bq_to_Ci
+                
+                purities_cu64.append(purity_cu64 * 100)  # Convert to percentage
+                activities_cu64.append(activity_cu64_Ci)
+                purities_cu67.append(purity_cu67 * 100)  # Convert to percentage
+                activities_cu67.append(activity_cu67_Ci)
+                param_values.append(params[param_name])
+            except Exception as e:
+                print(f"Warning: Error processing {output_dir}: {e}")
+                continue
+        
+        return purities_cu64, activities_cu64, purities_cu67, activities_cu67, param_values
+    
+    # Extract data for each parameter group
+    inner_p64, inner_a64, inner_p67, inner_a67, inner_vals = extract_data(inner_varying, 'inner')
+    outer_p64, outer_a64, outer_p67, outer_a67, outer_vals = extract_data(outer_varying, 'outer')
+    multi_p64, multi_a64, multi_p67, multi_a67, multi_vals = extract_data(multi_varying, 'multi')
+    mod_p64, mod_a64, mod_p67, mod_a67, mod_vals = extract_data(moderator_varying, 'moderator')
+    
+    # Create 2x4 grid of plots
+    fig, axes = plt.subplots(4, 2, figsize=(14, 16))
+    
+    # Cool colors for Cu64, warm colors for Cu67
+    cool_colors = plt.cm.Blues(np.linspace(0.4, 0.9, 10))
+    warm_colors = plt.cm.Reds(np.linspace(0.4, 0.9, 10))
+    
+    # Row 1: Inner dimensions
+    ax1_cu64 = axes[0, 0]
+    ax1_cu67 = axes[0, 1]
+    
+    if len(inner_p64) > 0:
+        ax1_cu64.scatter(inner_p64, inner_a64, c=cool_colors[:len(inner_p64)], s=100, alpha=0.7, 
+                        edgecolors='darkblue', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(inner_p64, inner_a64, inner_vals)):
+            ax1_cu64.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax1_cu64.set_xlabel('Cu64 Purity [%]', fontsize=10)
+        ax1_cu64.set_ylabel('Cu64 Production [Ci]', fontsize=10)
+        ax1_cu64.set_title(f'Inner Thickness (outer={min_outer:.0f}, multi={min_multi:.0f}, mod={min_moderator:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax1_cu64.grid(True, alpha=0.3)
+        if min(inner_p64) > 0:
+            ax1_cu64.set_xscale('log')
+        ax1_cu64.set_yscale('log')
+    
+    if len(inner_p67) > 0:
+        ax1_cu67.scatter(inner_p67, inner_a67, c=warm_colors[:len(inner_p67)], s=100, alpha=0.7, 
+                        edgecolors='darkred', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(inner_p67, inner_a67, inner_vals)):
+            ax1_cu67.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax1_cu67.set_xlabel('Cu67 Purity [%]', fontsize=10)
+        ax1_cu67.set_ylabel('Cu67 Production [Ci]', fontsize=10)
+        ax1_cu67.set_title(f'Inner Thickness (outer={min_outer:.0f}, multi={min_multi:.0f}, mod={min_moderator:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax1_cu67.grid(True, alpha=0.3)
+        if min(inner_p67) > 0:
+            ax1_cu67.set_xscale('log')
+        ax1_cu67.set_yscale('log')
+    
+    # Row 2: Outer dimensions
+    ax2_cu64 = axes[1, 0]
+    ax2_cu67 = axes[1, 1]
+    
+    if len(outer_p64) > 0:
+        ax2_cu64.scatter(outer_p64, outer_a64, c=cool_colors[:len(outer_p64)], s=100, alpha=0.7, 
+                        edgecolors='darkblue', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(outer_p64, outer_a64, outer_vals)):
+            ax2_cu64.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax2_cu64.set_xlabel('Cu64 Purity [%]', fontsize=10)
+        ax2_cu64.set_ylabel('Cu64 Production [Ci]', fontsize=10)
+        ax2_cu64.set_title(f'Outer Thickness (inner={min_inner:.0f}, multi={min_multi:.0f}, mod={min_moderator:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax2_cu64.grid(True, alpha=0.3)
+        if min(outer_p64) > 0:
+            ax2_cu64.set_xscale('log')
+        ax2_cu64.set_yscale('log')
+    
+    if len(outer_p67) > 0:
+        ax2_cu67.scatter(outer_p67, outer_a67, c=warm_colors[:len(outer_p67)], s=100, alpha=0.7, 
+                        edgecolors='darkred', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(outer_p67, outer_a67, outer_vals)):
+            ax2_cu67.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax2_cu67.set_xlabel('Cu67 Purity [%]', fontsize=10)
+        ax2_cu67.set_ylabel('Cu67 Production [Ci]', fontsize=10)
+        ax2_cu67.set_title(f'Outer Thickness (inner={min_inner:.0f}, multi={min_multi:.0f}, mod={min_moderator:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax2_cu67.grid(True, alpha=0.3)
+        if min(outer_p67) > 0:
+            ax2_cu67.set_xscale('log')
+        ax2_cu67.set_yscale('log')
+    
+    # Row 3: Multi thicknesses
+    ax3_cu64 = axes[2, 0]
+    ax3_cu67 = axes[2, 1]
+    
+    if len(multi_p64) > 0:
+        ax3_cu64.scatter(multi_p64, multi_a64, c=cool_colors[:len(multi_p64)], s=100, alpha=0.7, 
+                        edgecolors='darkblue', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(multi_p64, multi_a64, multi_vals)):
+            ax3_cu64.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax3_cu64.set_xlabel('Cu64 Purity [%]', fontsize=10)
+        ax3_cu64.set_ylabel('Cu64 Production [Ci]', fontsize=10)
+        ax3_cu64.set_title(f'Multi Thickness (inner={min_inner:.0f}, outer={min_outer:.0f}, mod={min_moderator:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax3_cu64.grid(True, alpha=0.3)
+        if min(multi_p64) > 0:
+            ax3_cu64.set_xscale('log')
+        ax3_cu64.set_yscale('log')
+    
+    if len(multi_p67) > 0:
+        ax3_cu67.scatter(multi_p67, multi_a67, c=warm_colors[:len(multi_p67)], s=100, alpha=0.7, 
+                        edgecolors='darkred', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(multi_p67, multi_a67, multi_vals)):
+            ax3_cu67.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax3_cu67.set_xlabel('Cu67 Purity [%]', fontsize=10)
+        ax3_cu67.set_ylabel('Cu67 Production [Ci]', fontsize=10)
+        ax3_cu67.set_title(f'Multi Thickness (inner={min_inner:.0f}, outer={min_outer:.0f}, mod={min_moderator:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax3_cu67.grid(True, alpha=0.3)
+        if min(multi_p67) > 0:
+            ax3_cu67.set_xscale('log')
+        ax3_cu67.set_yscale('log')
+    
+    # Row 4: Moderator thicknesses
+    ax4_cu64 = axes[3, 0]
+    ax4_cu67 = axes[3, 1]
+    
+    if len(mod_p64) > 0:
+        ax4_cu64.scatter(mod_p64, mod_a64, c=cool_colors[:len(mod_p64)], s=100, alpha=0.7, 
+                        edgecolors='darkblue', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(mod_p64, mod_a64, mod_vals)):
+            ax4_cu64.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax4_cu64.set_xlabel('Cu64 Purity [%]', fontsize=10)
+        ax4_cu64.set_ylabel('Cu64 Production [Ci]', fontsize=10)
+        ax4_cu64.set_title(f'Moderator Thickness (inner={min_inner:.0f}, outer={min_outer:.0f}, multi={min_multi:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax4_cu64.grid(True, alpha=0.3)
+        if min(mod_p64) > 0:
+            ax4_cu64.set_xscale('log')
+        ax4_cu64.set_yscale('log')
+    
+    if len(mod_p67) > 0:
+        ax4_cu67.scatter(mod_p67, mod_a67, c=warm_colors[:len(mod_p67)], s=100, alpha=0.7, 
+                        edgecolors='darkred', linewidth=1)
+        for i, (p, a, v) in enumerate(zip(mod_p67, mod_a67, mod_vals)):
+            ax4_cu67.annotate(f'{v:.0f}', (p, a), fontsize=7, alpha=0.8, 
+                            xytext=(5, 5), textcoords='offset points')
+        ax4_cu67.set_xlabel('Cu67 Purity [%]', fontsize=10)
+        ax4_cu67.set_ylabel('Cu67 Production [Ci]', fontsize=10)
+        ax4_cu67.set_title(f'Moderator Thickness (inner={min_inner:.0f}, outer={min_outer:.0f}, multi={min_multi:.0f})', 
+                          fontsize=10, fontweight='bold')
+        ax4_cu67.grid(True, alpha=0.3)
+        if min(mod_p67) > 0:
+            ax4_cu67.set_xscale('log')
+        ax4_cu67.set_yscale('log')
+    
+    plt.tight_layout()
+    out_dir = summary_output_dir if summary_output_dir is not None else (output_dir_list[0] if output_dir_list else ".")
+    output_path = os.path.join(out_dir, "geom_production_vs_purity.png")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"→ Saved geometry production vs purity → {output_path}")
+
+def main():
+    # ---- User configuration ----
+    material_id_list = ["0", "1"]
+    isotopes_to_plot = [f"Zn{i}" for i in range(64, 72)]
+    cu_isotopes = [f"Cu{i}" for i in range(63, 71)]
+    statepoint_batches = 10
+
+    # Discover irr_output_* directories (must contain depletion_results.h5)
+    output_dir_list = []
+    for dir in os.listdir("."):
+        if dir.startswith("irr_output_inner") and os.path.isfile(os.path.join(dir, "depletion_results.h5")):
+            output_dir_list.append(dir)
+            print(f"Found output directory: {dir}")
+
+    if not output_dir_list:
+        print("No irr_output_* directories with depletion_results.h5 found. Exiting.")
+        return
+
+    purity_results_list = {d: None for d in output_dir_list}
+    activity_results_list = {d: None for d in output_dir_list}
+    SA_results_list = {d: None for d in output_dir_list}
+
+    # ---- Per–output_dir processing (writes into each irr_output_* folder) ----
+    for output_dir in output_dir_list:
+        openmc.config['chain_file'] = os.path.join(output_dir, "JENDL_chain.xml")
+        print(f"\n{'='*70}")
+        print(f"Processing: {output_dir}")
+        print("="*70)
+
+        results_path = os.path.join(output_dir, "depletion_results.h5")
+        try:
+            results = openmc.deplete.Results(results_path)
+        except Exception as e:
+            print(f"Failed to load {results_path}: {e}")
             continue
-    
-    # Sort by Zn64 enrichment level (then by Zn67 if same Zn64)
-    sorted_indices = sorted(range(len(zn64_enrichment_list)), 
-                          key=lambda i: (zn64_enrichment_list[i], zn67_enrichment_list[i]))
-    zn64_enrichment_list = [zn64_enrichment_list[i] for i in sorted_indices]
-    zn67_enrichment_list = [zn67_enrichment_list[i] for i in sorted_indices]
-    output_dirs = [output_dirs[i] for i in sorted_indices]
 
-    print(f"\n✓ Found {len(output_dirs)} enrichment cases:")
-    for i, (zn64_enrich, zn67_enrich, output_dir) in enumerate(zip(zn64_enrichment_list, zn67_enrichment_list, output_dirs)):
-        print(f"  {i+1}. {output_dir} (Zn-64: {zn64_enrich*100:.1f}%, Zn-67: {zn67_enrich*100:.2f}%)")
-    print("="*70)
+        time_days = np.array(results.get_times())
+        time_steps = np.diff(time_days)
+        print(f"Time: {results.get_times()}")
+        print(f"Time days: {time_days}")
+        print(f"Time steps: {time_steps}")
 
-    successful_64_dirs = []
-    successful_67_dirs = []
-
-    
-    # Process each discovered directory
-    for output_dir, zn64_enrichment in zip(output_dirs, zn64_enrichment_list):
-        enrichment_pct = int(zn64_enrichment * 100)
-        
-        print(f"\n{'='*70}")
-        print(f"Processing: {output_dir} (Zn-64: {enrichment_pct}%)")
-        print(f"{'='*70}")
-        
-        # Step 1: Must have analyze_depletion working first
-        try:
-            results, results_path, isotopes_to_plot, cu_isotopes, irradiation_end_idx, time_days, final_step_atoms, total_atoms, df_final = analyze_depletion(output_dir)
-        except Exception as e:
-            print(f" Failed to load depletion results for {output_dir}: {e}")
-            print(f"   Skipping all analysis for this case...")
-            continue
-        
-        # Step 2: Basic analysis (only needs results)
-        try:
-            plot_zn_isotopes_evolution(results=results, output_dir=output_dir, isotopes_to_plot=isotopes_to_plot, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
-            plot_total_activity_evolution(results=results, output_dir=output_dir, time_days=time_days)
-            #plot_most_common_reactions(results=results, output_dir=output_dir, results_path=results_path)
-            #plot_most_common_reactions_isotope_breakdown(results=results, output_dir=output_dir, results_path=results_path)
-        except Exception as e:
-            print(f"Warning: Error in basic analysis for {output_dir}: {e}")
-            # Continue to try Cu-specific analysis
-        
-        # Step 3: Get final_atoms_dict (needed for post-irradiation analysis)
-        final_atoms_dict = None
-        try:
-            final_atoms_dict = plot_cu_isotopes_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
-            if final_atoms_dict is None or len(final_atoms_dict) == 0:
-                print(f"Warning: No Cu atoms found in {output_dir}. Skipping Cu-dependent analysis.")
-                final_atoms_dict = None
-        except Exception as e:
-            print(f"Warning: Error getting Cu atoms for {output_dir}: {e}")
-            final_atoms_dict = None
-        
-        # Step 4: Get total_activities (needed for purity and post-irradiation analysis)
-        total_activities = None
-        try:
-            total_activities = plot_cu_isotopes_activity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
-            if total_activities is None or len(total_activities) == 0:
-                print(f"Warning: No Cu activities found in {output_dir}. Skipping activity-dependent analysis.")
-                total_activities = None
-        except Exception as e:
-            print(f"Warning: Error getting Cu activities for {output_dir}: {e}")
-            total_activities = None
-        
-        # Step 5: Purity evolution (needs total_activities)
-        if total_activities is not None:
-            try:
-                plot_cu_isotopes_purity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, total_activities=total_activities, irradiation_end_idx=irradiation_end_idx)
-            except Exception as e:
-                print(f"Warning: Error in purity evolution plot for {output_dir}: {e}")
+        # Irradiation / cooldown split
+        large = np.where(time_steps >= min(time_steps))[0]
+        if len(large) > 0:
+            typical_irradiation_step = np.median(time_steps[:min(5, len(time_steps))])
+            threshold = 2.0 * typical_irradiation_step
+            large_steps = np.where(time_steps > threshold)[0]
+            if len(large_steps) > 0:
+                i = int(large_steps[0])
+                irradiation_end_idx = i + 1
+                print(f"Irradiation: steps 0–{irradiation_end_idx-1}; cooldown: {irradiation_end_idx}–{len(time_days)-1}")
+            else:
+                irradiation_end_idx = len(time_days)
         else:
-            print(f"Skipping purity evolution (no total_activities available)")
-        
-        # Step 6: Post-irradiation analysis (needs both total_activities AND final_atoms_dict)
-        if total_activities is not None and final_atoms_dict is not None:
+            irradiation_end_idx = len(time_days)
+
+        # Per-material: composition + Cu evolution + total activity
+        for material_id in material_id_list:
+            print(f"Processing material: {material_id}")
             try:
-                cu64_purity, cu67_purity, activity_total, post_time_seconds, cu64_activity, cu67_activity = plot_cu_isotopes_post_irradiation_activity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, total_activities=total_activities)
+                export_final_composition(results, material_id=material_id, output_file=os.path.join(output_dir, f"final_composition_{material_id}.csv"))
             except Exception as e:
-                print(f"Warning: Error in post-irradiation analysis for {output_dir}: {e}")
-        else:
-            print(f"Skipping post-irradiation analysis (missing prerequisites)")
-            if total_activities is None:
-                print(f"     - Missing: total_activities")
-            if final_atoms_dict is None:
-                print(f"     - Missing: final_atoms_dict")
-        
-        successful_64_dirs.append(output_dir)
-        print(f"Completed analysis for {output_dir}")
-
-
-
-    
-    # Process each discovered directory
-    for output_dir, zn67_enrichment in zip(output_dirs, zn67_enrichment_list):
-        enrichment_pct = int(zn67_enrichment * 100)
-        
-        print(f"\n{'='*70}")
-        print(f"Processing: {output_dir} (Zn-64: {enrichment_pct}%)")
-        print(f"{'='*70}")
-        
-        # Step 1: Must have analyze_depletion working first
-        try:
-            results, results_path, isotopes_to_plot, cu_isotopes, irradiation_end_idx, time_days, final_step_atoms, total_atoms, df_final = analyze_depletion(output_dir)
-        except Exception as e:
-            print(f" Failed to load depletion results for {output_dir}: {e}")
-            print(f"   Skipping all analysis for this case...")
-            continue        
-        
-        # Step 2: Basic analysis (only needs results)
-        try:
-            plot_zn_isotopes_evolution(results=results, output_dir=output_dir, isotopes_to_plot=isotopes_to_plot, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
-            plot_total_activity_evolution(results=results, output_dir=output_dir, time_days=time_days)
-            #plot_most_common_reactions(results=results, output_dir=output_dir, results_path=results_path)
-            #plot_most_common_reactions_isotope_breakdown(results=results, output_dir=output_dir, results_path=results_path)
-        except Exception as e:
-            print(f"Warning: Error in basic analysis for {output_dir}: {e}")
-            # Continue to try Cu-specific analysis
-        
-        # Step 3: Get final_atoms_dict (needed for post-irradiation analysis)
-        final_atoms_dict = None
-        try:
-            final_atoms_dict = plot_cu_isotopes_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
-            if final_atoms_dict is None or len(final_atoms_dict) == 0:
-                print(f"Warning: No Cu atoms found in {output_dir}. Skipping Cu-dependent analysis.")
-                final_atoms_dict = None
-        except Exception as e:
-            print(f"Warning: Error getting Cu atoms for {output_dir}: {e}")
-            final_atoms_dict = None
-        
-        # Step 4: Get total_activities (needed for purity and post-irradiation analysis)
-        total_activities = None
-        try:
-            total_activities = plot_cu_isotopes_activity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
-            if total_activities is None or len(total_activities) == 0:
-                print(f"Warning: No Cu activities found in {output_dir}. Skipping activity-dependent analysis.")
-                total_activities = None
-        except Exception as e:
-            print(f"Warning: Error getting Cu activities for {output_dir}: {e}")
-            total_activities = None
-        
-        # Step 5: Purity evolution (needs total_activities)
-        if total_activities is not None:
+                print(f"Warning: export_final_composition(material_id={material_id}): {e}")
             try:
-                plot_cu_isotopes_purity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, total_activities=total_activities, irradiation_end_idx=irradiation_end_idx)
+                plot_cu_isotopes_evolution(results, output_dir, material_id=material_id, cu_isotopes=cu_isotopes, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
             except Exception as e:
-                print(f"Warning: Error in purity evolution plot for {output_dir}: {e}")
-        else:
-            print(f"Skipping purity evolution (no total_activities available)")
-        
-        # Step 6: Post-irradiation analysis (needs both total_activities AND final_atoms_dict)
-        if total_activities is not None and final_atoms_dict is not None:
+                print(f"Warning: plot_cu_isotopes_evolution: {e}")
             try:
-                cu64_purity, cu67_purity, activity_total, post_time_seconds, cu64_activity, cu67_activity = plot_cu_isotopes_post_irradiation_activity_evolution(results=results, output_dir=output_dir, cu_isotopes=cu_isotopes, time_days=time_days, total_activities=total_activities)
+                plot_total_activity_evolution(results, output_dir, material_id=material_id, time_days=time_days)
             except Exception as e:
-                print(f"Warning: Error in post-irradiation analysis for {output_dir}: {e}")
-        else:
-            print(f"Skipping post-irradiation analysis (missing prerequisites)")
-            if total_activities is None:
-                print(f"     - Missing: total_activities")
-            if final_atoms_dict is None:
-                print(f"     - Missing: final_atoms_dict")
-        
-        successful_67_dirs.append(output_dir)
-        print(f"Completed analysis for {output_dir}")
+                print(f"Warning: plot_total_activity_evolution: {e}")
 
+        # Flux / heating by cell (optional, needs statepoint)
+        try:
+            sp_path = os.path.join(output_dir, f"statepoint.{statepoint_batches}.h5")
+            if os.path.isfile(sp_path):
+                plot_flux_spectra_and_heating_by_cell(sp_path, output_dir, time_days=time_days)
+            else:
+                print(f"  Skipping flux/heating by cell (no {sp_path})")
+        except Exception as e:
+            print(f"Warning: plot_flux_spectra_and_heating_by_cell: {e}")
 
-    
-    # Step 7: Comparison analysis (only if we have successful directories)
-    if successful_64_dirs:
-        print(f"\n{'='*70}")
-        print(f"Running comparison analysis for 64Cu/67Cu purity and activity across {len(successful_64_dirs)} successful cases...")
-        print(f"{'='*70}")
+        # Cu activity evolution → total_activities, activity_results (needed for purity and geom plots)
+        total_activities, activity_results = None, None
         try:
-            analyze_depletion_zn_enrichment(successful_dirs=successful_64_dirs)
+            total_activities, activity_results = plot_cu_isotopes_activity_evolution(results, output_dir, material_id_list=material_id_list, cu_isotopes=cu_isotopes, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
         except Exception as e:
-            print(f"Error in comparison analysis: {e}")
-            import traceback
-            traceback.print_exc()
-    else:
-        print(f"\n{'='*70}")
-        print(f"No enriched 64Zn directories were successfully processed!")
-        print(f"{'='*70}")
-    
-    if successful_67_dirs:
-        print(f"\n{'='*70}")
-        print(f"Running comparison analysis for 67Cu/64Zn purity and activity across {len(successful_67_dirs)} successful cases...")
-        print(f"{'='*70}")
+            print(f"Warning: plot_cu_isotopes_activity_evolution: {e}")
+        activity_results_list[output_dir] = activity_results
+
+        # Zn plots
         try:
-            analyze_depletion_zn_enrichment(successful_dirs=successful_67_dirs)
+            plot_zn_isotopes_activity_evolution(results, output_dir, material_id_list=material_id_list, isotopes_to_plot=isotopes_to_plot, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
         except Exception as e:
-            print(f"Error in comparison analysis: {e}")
-            import traceback
-            traceback.print_exc()
-    else:
-        print(f"\n{'='*70}")
-        print(f"No enriched 67Zn directories were successfully processed!")
-        print(f"{'='*70}")
-    
-    print(f"\n{'='*70}")
-    print(f"Analysis Summary:")
-    print(f"  Total directories found: {len(output_dirs)}")
-    print(f"  Successfully processed: {len(successful_64_dirs) + len(successful_67_dirs)}")
-    print(f"{'='*70}")
+            print(f"Warning: plot_zn_isotopes_activity_evolution: {e}")
+        try:
+            plot_zn_isotopes_SA_evolution(results, output_dir, material_id_list=material_id_list, isotopes_to_plot=isotopes_to_plot, time_days=time_days, irradiation_end_idx=irradiation_end_idx)
+        except Exception as e:
+            print(f"Warning: plot_zn_isotopes_SA_evolution: {e}")
+
+        # Cu purity (uses total_activities and activity_results from this output_dir)
+        if total_activities is not None and activity_results is not None:
+            try:
+                purity_results, SA_results = plot_cu_isotopes_purity_evolution(results, output_dir, material_id_list=material_id_list, cu_isotopes=cu_isotopes, time_days=time_days, total_activities=total_activities, activity_results=activity_results, irradiation_end_idx=irradiation_end_idx)
+                purity_results_list[output_dir] = purity_results
+                SA_results_list[output_dir] = SA_results
+            except Exception as e:
+                print(f"Warning: plot_cu_isotopes_purity_evolution: {e}")
+
+        print(f"Completed: {output_dir}")
+
+    # ---- Aggregate/geom plots (use all output_dirs, write into Irr_output_results) ----
+    # Summary/geom plots: one folder alongside the irr_output_* run dirs (e.g. ~/irr_output_results when run from ~)
+    summary_output_dir = os.path.join(os.getcwd(), "irr_output_results")
+    os.makedirs(summary_output_dir, exist_ok=True)
+
+    if purity_results_list:
+        try:
+            plot_geom_purity_evolution(purity_results_list=purity_results_list, output_dir_list=output_dir_list, summary_output_dir=summary_output_dir)
+        except Exception as e:
+            print(f"Warning: plot_geom_purity_evolution: {e}")
+
+    if activity_results_list:
+        try:
+            plot_geom_activity_evolution(activity_results_list=activity_results_list, output_dir_list=output_dir_list, summary_output_dir=summary_output_dir)
+        except Exception as e:
+            print(f"Warning: plot_geom_activity_evolution: {e}")
+
+    if purity_results_list and activity_results_list:
+        try:
+            plot_production_vs_purity(purity_results_list=purity_results_list, activity_results_list=activity_results_list, output_dir_list=output_dir_list, summary_output_dir=summary_output_dir)
+        except Exception as e:
+            print(f"Warning: plot_production_vs_purity: {e}")
+        try:
+            plot_geom_prod_vs_purity(purity_results_list=purity_results_list, activity_results_list=activity_results_list, output_dir_list=output_dir_list, summary_output_dir=summary_output_dir)
+        except Exception as e:
+            print(f"Warning: plot_geom_prod_vs_purity: {e}")
+
 
 if __name__ == '__main__':
     main()
+
+
+    
