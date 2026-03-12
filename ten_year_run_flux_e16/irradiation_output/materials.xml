@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<materials>
+  <material id="1" name="target_material" depletable="true" volume="300.0">
+    <density value="7.9" units="g/cm3"/>
+    <nuclide name="Gd154" ao="1.0"/>
+  </material>
+  <material id="2" name="vacuum">
+    <density value="1e-10" units="g/cm3"/>
+    <nuclide name="H1" ao="1.0"/>
+  </material>
+</materials>

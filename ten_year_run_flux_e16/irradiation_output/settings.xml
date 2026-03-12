@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<settings>
+  <run_mode>fixed source</run_mode>
+  <particles>10000</particles>
+  <batches>10</batches>
+  <source type="independent" strength="1.0" particle="neutron">
+    <space type="box">
+      <parameters>-5.0 -5.0 20.0 5.0 5.0 20.0</parameters>
+    </space>
+    <angle type="monodirectional" reference_uvw="0.0 0.0 -1.0"/>
+    <energy type="discrete">
+      <parameters>14100000.0 1.0</parameters>
+    </energy>
+  </source>
+</settings>
